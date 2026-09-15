@@ -13,7 +13,7 @@
       },
       "reauth_confirm": {
         "title": "Reconnect Sentrymo",
-        "description": "Enter a new pairing key and the 4-digit CPIN from the Sentrymo app.",
+        "description": "Enter a new pairing key. Enter the 4-digit CPIN if command controls should remain available.",
         "data": {
           "api_environment": "API environment",
           "setup_key": "Pairing key",
@@ -23,11 +23,12 @@
     },
     "error": {
       "cannot_connect": "Connection failed",
-      "invalid_auth": "Invalid pairing key or CPIN",
+      "invalid_auth": "Invalid pairing key",
       "invalid_cpin": "CPIN must be exactly 4 digits",
-      "package_unavailable": "Home Assistant integration is not available for this package",
       "setup_key_expired": "The pairing key has expired or has already been used",
-      "unknown": "Unexpected error"
+      "unknown": "Unexpected error",
+      "feature_unavailable": "The Home Assistant feature is not available in the current Sentrymo package",
+      "permission_denied": "The integration does not have permission for this operation"
     },
     "abort": {
       "already_configured": "Sentrymo is already configured",
@@ -186,6 +187,56 @@
       "protection_mode_control": {
         "name": "Protection mode"
       }
+    }
+  },
+  "exceptions": {
+    "command_missing_cpin": {
+      "message": "This command requires a 4-digit CPIN stored in the Sentrymo integration. Re-pair the integration to add it."
+    },
+    "command_invalid_cpin": {
+      "message": "Sentrymo rejected the stored CPIN. Re-pair the integration with the current CPIN."
+    },
+    "command_cpin_locked": {
+      "message": "CPIN verification is temporarily locked. Wait before trying the command again."
+    },
+    "command_output_not_configured": {
+      "message": "This output is not configured for the selected vehicle."
+    },
+    "command_vehicle_unavailable": {
+      "message": "The selected vehicle is no longer available to this integration."
+    },
+    "command_permission_denied": {
+      "message": "This integration does not have permission or command scope for that operation."
+    },
+    "command_commands_disabled": {
+      "message": "Commands are disabled for this Sentrymo integration."
+    },
+    "command_unsupported": {
+      "message": "This command is not supported for the selected vehicle."
+    },
+    "command_rate_limited": {
+      "message": "Sentrymo is rate-limiting commands. Wait before trying again."
+    },
+    "command_authentication_required": {
+      "message": "Sentrymo authentication is no longer valid. Complete reauthentication before trying again."
+    },
+    "command_entitlement_unavailable": {
+      "message": "The Home Assistant feature is not available in the current Sentrymo package."
+    },
+    "command_temporarily_unavailable": {
+      "message": "Sentrymo is temporarily unavailable. The command was not acknowledged; try again later."
+    },
+    "command_failed": {
+      "message": "Sentrymo did not accept the command."
+    },
+    "command_vehicle_ambiguous": {
+      "message": "This vehicle exists in more than one Sentrymo config entry. Specify entry_id."
+    }
+  },
+  "issues": {
+    "entitlement_unavailable": {
+      "title": "Sentrymo feature unavailable",
+      "description": "The Home Assistant feature is not available in the current Sentrymo package. The config entry is retained and its existing entities remain unavailable until server access is restored."
     }
   }
 }

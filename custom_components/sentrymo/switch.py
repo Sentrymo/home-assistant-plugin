@@ -10,10 +10,11 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .api import SentrymoApiError, SentrymoCommandError
+from .commands import command_error_translation_key, output_update_was_confirmed
 from .const import DATA_COORDINATOR, DOMAIN
 from .coordinator import SentrymoDataUpdateCoordinator
 from .entity import SentrymoEntity
+from .errors import SentrymoApiError
 
 
 def _capabilities(vehicle: dict[str, Any]) -> dict[str, Any]:
@@ -53,13 +54,6 @@ def _supports_output_commands(vehicle: dict[str, Any]) -> bool:
         or capabilities.get("protection_commands")
         or capabilities.get("commands")
     )
-
-
-def _command_error_message(label: str, err: SentrymoApiError) -> str:
-    """Build a user-facing output command error message."""
-    if isinstance(err, SentrymoCommandError):
-        return f"Zmena vystupu {label} zlyhala: {err}"
-    return f"Nepodarilo sa kontaktovat Sentrymo pri ovladani vystupu {label}: {err}"
 
 
 async def async_setup_entry(
@@ -114,7 +108,12 @@ class SentrymoOutputSwitch(SentrymoEntity, SwitchEntity):
     state_keys: tuple[str, ...] = ()
     command_label = ""
 
-    def __init__(self, coordinator: SentrymoDataUpdateCoordinator, vehicle_id: str, entity_key: str) -> None:
+    def __init__(
+        self,
+        coordinator: SentrymoDataUpdateCoordinator,
+        vehicle_id: str,
+        entity_key: str,
+    ) -> None:
         """Initialize the switch."""
         super().__init__(coordinator, vehicle_id, entity_key)
         self._attr_translation_key = entity_key
@@ -164,17 +163,30 @@ class SentrymoOutputSwitch(SentrymoEntity, SwitchEntity):
         await self._async_set_enabled(False)
 
     async def _async_set_enabled(self, enabled: bool) -> None:
-        """Send the output command and apply an optimistic state update."""
+        """Send the output request and reconcile acknowledged state."""
         try:
-            await self._async_send_command(enabled)
+            response = await self._async_send_command(enabled)
         except SentrymoApiError as err:
-            raise HomeAssistantError(_command_error_message(self.command_label, err)) from err
+            self.coordinator.async_handle_command_error(
+                err, vehicle_id=self.vehicle_id
+            )
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key=command_error_translation_key(err),
+            ) from err
 
-        state_updates = {key: enabled for key in self.state_keys}
-        self.coordinator.async_apply_vehicle_state(self.vehicle_id, **state_updates)
-        self.hass.async_create_task(self.coordinator.async_refresh_after_delay(1.5))
+        if output_update_was_confirmed(response):
+            state_updates = {key: enabled for key in self.state_keys}
+            self.coordinator.async_apply_vehicle_state(
+                self.vehicle_id, **state_updates
+            )
+        self.hass.async_create_task(
+            self.coordinator.async_refresh_after_delay(1.5)
+        )
 
-    async def _async_send_command(self, enabled: bool) -> None:
+    async def _async_send_command(
+        self, enabled: bool
+    ) -> dict[str, Any]:
         """Send the backend command for this output."""
         raise NotImplementedError
 
@@ -190,9 +202,13 @@ class SentrymoImmobilizerSwitch(SentrymoOutputSwitch):
         """Initialize the switch."""
         super().__init__(coordinator, vehicle_id, "immobilizer_output")
 
-    async def _async_send_command(self, enabled: bool) -> None:
+    async def _async_send_command(
+        self, enabled: bool
+    ) -> dict[str, Any]:
         """Send the immobilizer command."""
-        await self.coordinator.client.async_set_immobilizer_active(self.vehicle_id, enabled)
+        return await self.coordinator.client.async_set_immobilizer_active(
+            self.vehicle_id, enabled
+        )
 
 
 class SentrymoAccessorySwitch(SentrymoOutputSwitch):
@@ -214,6 +230,10 @@ class SentrymoAccessorySwitch(SentrymoOutputSwitch):
             return backend_name.strip()
         return None
 
-    async def _async_send_command(self, enabled: bool) -> None:
+    async def _async_send_command(
+        self, enabled: bool
+    ) -> dict[str, Any]:
         """Send the accessory command."""
-        await self.coordinator.client.async_set_accessory_active(self.vehicle_id, enabled)
+        return await self.coordinator.client.async_set_accessory_active(
+            self.vehicle_id, enabled
+        )

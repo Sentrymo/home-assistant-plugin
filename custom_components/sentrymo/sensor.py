@@ -223,7 +223,9 @@ SENSOR_DESCRIPTIONS: tuple[SentrymoSensorDescription, ...] = (
         translation_key="alarm_state",
         always_create=True,
         icon_fn=lambda vehicle: (
-            "mdi:alarm-light" if _vehicle_state(vehicle).get("alarm_active") else "mdi:alarm-light-off"
+            "mdi:alarm-light"
+            if _vehicle_state(vehicle).get("alarm_active")
+            else "mdi:alarm-light-off"
         ),
         value_fn=lambda vehicle: _vehicle_state(vehicle).get("alarm_state"),
     ),

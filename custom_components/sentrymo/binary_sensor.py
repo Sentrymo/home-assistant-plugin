@@ -144,7 +144,10 @@ async def async_setup_entry(
     coordinator: SentrymoDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id][DATA_COORDINATOR]
     known_entity_keys: set[tuple[str, str]] = set()
 
-    def _should_create(vehicle: dict[str, Any], description: SentrymoBinarySensorDescription) -> bool:
+    def _should_create(
+        vehicle: dict[str, Any],
+        description: SentrymoBinarySensorDescription,
+    ) -> bool:
         return description.always_create or description.value_fn(vehicle) is not None
 
     def _build_entities() -> list[SentrymoBinarySensor]:

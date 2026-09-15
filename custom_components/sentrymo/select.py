@@ -10,7 +10,10 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .api import SentrymoApiError, SentrymoCommandError
+from .commands import (
+    command_error_translation_key,
+    protection_update_was_accepted,
+)
 from .const import (
     DATA_CLIENT,
     DATA_COORDINATOR,
@@ -22,6 +25,7 @@ from .const import (
 )
 from .coordinator import SentrymoDataUpdateCoordinator
 from .entity import SentrymoEntity
+from .errors import SentrymoApiError
 
 
 def _capabilities(vehicle: dict[str, Any]) -> dict[str, Any]:
@@ -71,13 +75,6 @@ def _protection_state_updates(mode: str) -> dict[str, Any]:
         "protection_mode": mode,
         "protection_active": mode != PROTECTION_MODE_DISABLED,
     }
-
-
-def _protection_mode_error_message(err: SentrymoApiError) -> str:
-    """Build a user-facing protection mode error message."""
-    if isinstance(err, SentrymoCommandError):
-        return f"Zmena rezimu ochrany zlyhala: {err}"
-    return f"Nepodarilo sa kontaktovat Sentrymo pri zmene rezimu ochrany: {err}"
 
 
 async def async_setup_entry(
@@ -186,12 +183,23 @@ class SentrymoProtectionModeSelect(SentrymoEntity, SelectEntity):
             return
 
         try:
-            await self.client.async_set_protection_mode(self.vehicle_id, backend_option)
+            response = await self.client.async_set_protection_mode(
+                self.vehicle_id, backend_option
+            )
         except SentrymoApiError as err:
-            raise HomeAssistantError(_protection_mode_error_message(err)) from err
+            self.coordinator.async_handle_command_error(
+                err, vehicle_id=self.vehicle_id
+            )
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key=command_error_translation_key(err),
+            ) from err
 
-        self.coordinator.async_apply_vehicle_state(
-            self.vehicle_id,
-            **_protection_state_updates(backend_option),
+        if protection_update_was_accepted(response):
+            self.coordinator.async_apply_vehicle_state(
+                self.vehicle_id,
+                **_protection_state_updates(backend_option),
+            )
+        self.hass.async_create_task(
+            self.coordinator.async_refresh_after_delay(1.5)
         )
-        self.hass.async_create_task(self.coordinator.async_refresh_after_delay(1.5))

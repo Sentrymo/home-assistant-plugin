@@ -1,6 +1,6 @@
 refresh:
   name: Refresh Sentrymo data
-  description: Force an immediate Sentrymo data refresh.
+  description: Request an immediate authorized Sentrymo snapshot refresh.
   fields:
     entry_id:
       name: Entry ID
@@ -11,7 +11,7 @@ refresh:
 
 set_protection_mode:
   name: Set protection mode
-  description: Change Sentrymo vehicle protection mode. This uses the CPIN stored during pairing.
+  description: Request a Sentrymo vehicle protection-mode change using the CPIN stored during pairing. An accepted response acknowledges the request but is not a physical-execution guarantee.
   fields:
     vehicle_id:
       name: Vehicle ID
@@ -21,7 +21,7 @@ set_protection_mode:
         text:
     mode:
       name: Mode
-      description: Protection mode.
+      description: Requested protection mode.
       required: true
       selector:
         select:
@@ -38,7 +38,7 @@ set_protection_mode:
 
 set_immobilizer:
   name: Set immobilizer
-  description: Activate or deactivate the Sentrymo immobilizer output. This uses the CPIN stored during pairing.
+  description: Queue an immobilizer output request using the CPIN stored during pairing. Queued does not mean physically completed.
   fields:
     vehicle_id:
       name: Vehicle ID
@@ -48,7 +48,7 @@ set_immobilizer:
         text:
     enabled:
       name: Enabled
-      description: Turn the immobilizer output on or off.
+      description: Requested immobilizer output state.
       required: true
       selector:
         boolean:
@@ -61,7 +61,7 @@ set_immobilizer:
 
 set_accessory:
   name: Set accessory
-  description: Activate or deactivate the Sentrymo accessory output. This uses the CPIN stored during pairing.
+  description: Queue an accessory output request using the CPIN stored during pairing. Queued does not mean physically completed.
   fields:
     vehicle_id:
       name: Vehicle ID
@@ -71,7 +71,7 @@ set_accessory:
         text:
     enabled:
       name: Enabled
-      description: Turn the accessory output on or off.
+      description: Requested accessory output state.
       required: true
       selector:
         boolean:

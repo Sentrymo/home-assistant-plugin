@@ -11,6 +11,47 @@ from .const import DOMAIN
 from .coordinator import SentrymoDataUpdateCoordinator
 
 
+_ENTITY_SOURCE_SEGMENTS: dict[str, tuple[str, ...]] = {
+    "location": ("fast",),
+    "last_update": ("fast", "telemetry", "slow"),
+    "vehicle_status": ("fast",),
+    "moving": ("fast",),
+    "driving": ("fast",),
+    "ignition": ("fast",),
+    "acc": ("fast",),
+    "immo": ("fast",),
+    "locked": ("fast",),
+    "protection_active": ("fast",),
+    "protection_mode": ("fast",),
+    "protection_mode_control": ("fast",),
+    "alarm_active": ("fast",),
+    "alarm_state": ("fast",),
+    "crash_detected": ("fast",),
+    "crash_state": ("fast",),
+    "online": ("fast",),
+    "address": ("fast", "slow"),
+    "places": ("fast", "slow"),
+    "speed": ("telemetry",),
+    "external_voltage": ("telemetry",),
+    "internal_battery": ("telemetry", "slow"),
+    "gsm_signal": ("telemetry",),
+    "sleep_state": ("telemetry",),
+    "gnss_state": ("telemetry",),
+    "data_mode": ("telemetry",),
+    "engine_rpm": ("telemetry",),
+    "satellites": ("telemetry",),
+    "hdop": ("telemetry",),
+    "low_voltage": ("telemetry",),
+    "doors_open": ("telemetry",),
+    "bt_connected": ("telemetry",),
+    "fuel_level": ("slow",),
+    "odometer": ("telemetry", "slow"),
+    "engine_temperature": ("telemetry", "slow"),
+    "immobilizer_output": ("fast",),
+    "accessory_output": ("fast",),
+}
+
+
 class SentrymoEntity(CoordinatorEntity[SentrymoDataUpdateCoordinator]):
     """Base coordinator entity for Sentrymo vehicles."""
 
@@ -46,22 +87,53 @@ class SentrymoEntity(CoordinatorEntity[SentrymoDataUpdateCoordinator]):
 
     @property
     def available(self) -> bool:
-        """Return entity availability."""
-        return self.coordinator.last_update_success and bool(self.vehicle)
+        """Return availability without presenting denied cached data as current."""
+        if not self.coordinator.last_update_success or not self.vehicle:
+            return False
+
+        unavailable = self.vehicle.get("_unavailable_segments", [])
+        unavailable_segments = (
+            {str(segment) for segment in unavailable}
+            if isinstance(unavailable, (list, set, tuple))
+            else set()
+        )
+        source_segments = _ENTITY_SOURCE_SEGMENTS.get(self.entity_key)
+        if source_segments is None:
+            return True
+
+        return any(
+            segment not in unavailable_segments
+            for segment in source_segments
+        )
 
     @property
     def unique_id(self) -> str:
         """Return unique id."""
-        return f"sentrymo_{self.coordinator.instance_id}_{self.vehicle_id}_{self.entity_key}"
+        return (
+            f"sentrymo_{self.coordinator.instance_id}_"
+            f"{self.vehicle_id}_{self.entity_key}"
+        )
 
     @property
     def device_info(self) -> DeviceInfo:
         """Return device info for the vehicle."""
         package = self.vehicle.get("package")
-        model = package.title() if isinstance(package, str) and package else "Vehicle"
+        model = (
+            package.title()
+            if isinstance(package, str) and package
+            else "Vehicle"
+        )
         return DeviceInfo(
-            identifiers={(DOMAIN, f"{self.coordinator.instance_id}_{self.vehicle_id}")},
+            identifiers={
+                (
+                    DOMAIN,
+                    f"{self.coordinator.instance_id}_{self.vehicle_id}",
+                )
+            },
             manufacturer="Sentrymo",
-            name=str(self.vehicle.get("name") or f"Vehicle {self.vehicle_id}"),
+            name=str(
+                self.vehicle.get("name")
+                or f"Vehicle {self.vehicle_id}"
+            ),
             model=model,
         )

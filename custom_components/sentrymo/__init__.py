@@ -6,7 +6,7 @@ from collections.abc import Iterable
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -14,7 +14,12 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
-from .api import SentrymoApiClient, SentrymoApiError, SentrymoCommandError
+from .api import SentrymoApiClient
+from .commands import (
+    command_error_translation_key,
+    output_update_was_confirmed,
+    protection_update_was_accepted,
+)
 from .const import (
     ATTR_ENABLED,
     ATTR_ENTRY_ID,
@@ -39,6 +44,7 @@ from .const import (
     SERVICE_SET_PROTECTION_MODE,
 )
 from .coordinator import SentrymoDataUpdateCoordinator
+from .errors import SentrymoApiError, SentrymoInvalidAuth
 
 
 def _protection_state_updates(mode: str) -> dict[str, bool | str]:
@@ -49,18 +55,22 @@ def _protection_state_updates(mode: str) -> dict[str, bool | str]:
     }
 
 
-def _protection_mode_error_message(err: SentrymoApiError) -> str:
-    """Build a user-facing protection mode error message."""
-    if isinstance(err, SentrymoCommandError):
-        return f"Zmena rezimu ochrany zlyhala: {err}"
-    return f"Nepodarilo sa kontaktovat Sentrymo pri zmene rezimu ochrany: {err}"
+def _command_home_assistant_error(
+    err: SentrymoApiError,
+) -> HomeAssistantError:
+    """Build a localized, non-secret command exception."""
+    return HomeAssistantError(
+        translation_domain=DOMAIN,
+        translation_key=command_error_translation_key(err),
+    )
 
 
-def _output_error_message(label: str, err: SentrymoApiError) -> str:
-    """Build a user-facing output error message."""
-    if isinstance(err, SentrymoCommandError):
-        return f"Zmena vystupu {label} zlyhala: {err}"
-    return f"Nepodarilo sa kontaktovat Sentrymo pri ovladani vystupu {label}: {err}"
+def _missing_cpin_error() -> HomeAssistantError:
+    """Build the localized missing-CPIN exception."""
+    return HomeAssistantError(
+        translation_domain=DOMAIN,
+        translation_key="command_missing_cpin",
+    )
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -96,9 +106,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _async_migrate_entity_identity_scope(hass, entry)
     api_url = _migrate_api_url(hass, entry)
 
-    async def _async_update_tokens(tokens: dict[str, str]) -> None:
+    async def _async_update_tokens(
+        tokens: dict[str, str | None],
+    ) -> None:
         data = dict(entry.data)
-        data.update(tokens)
+        for key, value in tokens.items():
+            if value is None:
+                data.pop(key, None)
+            else:
+                data[key] = value
         hass.config_entries.async_update_entry(entry, data=data)
 
     client = SentrymoApiClient(
@@ -110,7 +126,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         cpin=entry.data.get(CONF_CPIN),
         token_update_callback=_async_update_tokens,
     )
-    await _async_restore_tokens(entry, client, hass)
+    try:
+        await _async_restore_tokens(entry, client, hass)
+    except SentrymoInvalidAuth as err:
+        raise ConfigEntryAuthFailed from err
+
     coordinator = SentrymoDataUpdateCoordinator(hass, client, entry.entry_id)
     await coordinator.async_config_entry_first_refresh()
 
@@ -135,8 +155,25 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 
-async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload a config entry when options or tokens change."""
+async def async_reload_entry(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Reload only when an option changes the selected API endpoint."""
+    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    client = (
+        entry_data.get(DATA_CLIENT)
+        if isinstance(entry_data, dict)
+        else None
+    )
+    configured_url = entry.options.get(
+        CONF_API_URL, entry.data.get(CONF_API_URL)
+    )
+    if (
+        isinstance(client, SentrymoApiClient)
+        and client.api_url
+        == SentrymoApiClient.normalize_api_url(configured_url)
+    ):
+        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 
@@ -223,87 +260,129 @@ async def _async_register_services(hass: HomeAssistant) -> None:
     async def async_handle_set_protection_mode(call: ServiceCall) -> None:
         vehicle_id = str(call.data[ATTR_VEHICLE_ID])
         mode = str(call.data[ATTR_MODE])
-        matching_entries = _matching_entries_for_vehicle(hass, vehicle_id, call.data.get(ATTR_ENTRY_ID))
+        matching_entries = _matching_entries_for_vehicle(
+            hass,
+            vehicle_id,
+            call.data.get(ATTR_ENTRY_ID),
+        )
 
         if not matching_entries:
             return
 
         if call.data.get(ATTR_ENTRY_ID) is None and len(matching_entries) > 1:
             raise HomeAssistantError(
-                "Vozidlo bolo najdene na viacerych serveroch. Pri volani sluzby zadaj entry_id."
+                translation_domain=DOMAIN,
+                translation_key="command_vehicle_ambiguous",
             )
 
         for data in matching_entries:
             coordinator = data[DATA_COORDINATOR]
             client = data[DATA_CLIENT]
             if not client.cpin:
-                raise HomeAssistantError("CPIN nie je dostupny pre zmenu rezimu ochrany.")
+                raise _missing_cpin_error()
             try:
-                await client.async_set_protection_mode(vehicle_id, mode)
+                response = await client.async_set_protection_mode(
+                    vehicle_id, mode
+                )
             except SentrymoApiError as err:
-                raise HomeAssistantError(_protection_mode_error_message(err)) from err
-            coordinator.async_apply_vehicle_state(vehicle_id, **_protection_state_updates(mode))
-            hass.async_create_task(coordinator.async_refresh_after_delay(1.5))
+                coordinator.async_handle_command_error(
+                    err, vehicle_id=vehicle_id
+                )
+                raise _command_home_assistant_error(err) from err
+            if protection_update_was_accepted(response):
+                coordinator.async_apply_vehicle_state(
+                    vehicle_id,
+                    **_protection_state_updates(mode),
+                )
+            hass.async_create_task(
+                coordinator.async_refresh_after_delay(1.5)
+            )
             return
 
     async def async_handle_set_immobilizer(call: ServiceCall) -> None:
         vehicle_id = str(call.data[ATTR_VEHICLE_ID])
         enabled = bool(call.data[ATTR_ENABLED])
-        matching_entries = _matching_entries_for_vehicle(hass, vehicle_id, call.data.get(ATTR_ENTRY_ID))
+        matching_entries = _matching_entries_for_vehicle(
+            hass,
+            vehicle_id,
+            call.data.get(ATTR_ENTRY_ID),
+        )
 
         if not matching_entries:
             return
 
         if call.data.get(ATTR_ENTRY_ID) is None and len(matching_entries) > 1:
             raise HomeAssistantError(
-                "Vozidlo bolo najdene na viacerych serveroch. Pri volani sluzby zadaj entry_id."
+                translation_domain=DOMAIN,
+                translation_key="command_vehicle_ambiguous",
             )
 
         for data in matching_entries:
             coordinator = data[DATA_COORDINATOR]
             client = data[DATA_CLIENT]
             if not client.cpin:
-                raise HomeAssistantError("CPIN nie je dostupny pre ovladanie imobilizera.")
+                raise _missing_cpin_error()
             try:
-                await client.async_set_immobilizer_active(vehicle_id, enabled)
+                response = await client.async_set_immobilizer_active(
+                    vehicle_id, enabled
+                )
             except SentrymoApiError as err:
-                raise HomeAssistantError(_output_error_message("imobilizer", err)) from err
-            coordinator.async_apply_vehicle_state(
-                vehicle_id,
-                immobilizer_active=enabled,
-                immo=enabled,
+                coordinator.async_handle_command_error(
+                    err, vehicle_id=vehicle_id
+                )
+                raise _command_home_assistant_error(err) from err
+            if output_update_was_confirmed(response):
+                coordinator.async_apply_vehicle_state(
+                    vehicle_id,
+                    immobilizer_active=enabled,
+                    immo=enabled,
+                )
+            hass.async_create_task(
+                coordinator.async_refresh_after_delay(1.5)
             )
-            hass.async_create_task(coordinator.async_refresh_after_delay(1.5))
             return
 
     async def async_handle_set_accessory(call: ServiceCall) -> None:
         vehicle_id = str(call.data[ATTR_VEHICLE_ID])
         enabled = bool(call.data[ATTR_ENABLED])
-        matching_entries = _matching_entries_for_vehicle(hass, vehicle_id, call.data.get(ATTR_ENTRY_ID))
+        matching_entries = _matching_entries_for_vehicle(
+            hass,
+            vehicle_id,
+            call.data.get(ATTR_ENTRY_ID),
+        )
 
         if not matching_entries:
             return
 
         if call.data.get(ATTR_ENTRY_ID) is None and len(matching_entries) > 1:
             raise HomeAssistantError(
-                "Vozidlo bolo najdene na viacerych serveroch. Pri volani sluzby zadaj entry_id."
+                translation_domain=DOMAIN,
+                translation_key="command_vehicle_ambiguous",
             )
 
         for data in matching_entries:
             coordinator = data[DATA_COORDINATOR]
             client = data[DATA_CLIENT]
             if not client.cpin:
-                raise HomeAssistantError("CPIN nie je dostupny pre ovladanie prislusenstva.")
+                raise _missing_cpin_error()
             try:
-                await client.async_set_accessory_active(vehicle_id, enabled)
+                response = await client.async_set_accessory_active(
+                    vehicle_id, enabled
+                )
             except SentrymoApiError as err:
-                raise HomeAssistantError(_output_error_message("prislusenstvo", err)) from err
-            coordinator.async_apply_vehicle_state(
-                vehicle_id,
-                accessory_active=enabled,
-                acc=enabled,
+                coordinator.async_handle_command_error(
+                    err, vehicle_id=vehicle_id
+                )
+                raise _command_home_assistant_error(err) from err
+            if output_update_was_confirmed(response):
+                coordinator.async_apply_vehicle_state(
+                    vehicle_id,
+                    accessory_active=enabled,
+                    acc=enabled,
+                )
+            hass.async_create_task(
+                coordinator.async_refresh_after_delay(1.5)
             )
-            hass.async_create_task(coordinator.async_refresh_after_delay(1.5))
             return
 
     hass.services.async_register(

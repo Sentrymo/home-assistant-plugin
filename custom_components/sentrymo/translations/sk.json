@@ -13,7 +13,7 @@
       },
       "reauth_confirm": {
         "title": "Znovu pripojiť Sentrymo",
-        "description": "Zadaj nový párovací kľúč a 4-miestny CPIN zo Sentrymo aplikácie.",
+        "description": "Zadaj nový párovací kľúč. Ak majú zostať dostupné príkazy, zadaj aj 4-miestny CPIN.",
         "data": {
           "api_environment": "API prostredie",
           "setup_key": "Párovací kľúč",
@@ -23,11 +23,12 @@
     },
     "error": {
       "cannot_connect": "Pripojenie zlyhalo",
-      "invalid_auth": "Neplatný párovací kľúč alebo CPIN",
+      "invalid_auth": "Neplatný párovací kľúč",
       "invalid_cpin": "CPIN musí mať presne 4 číslice",
-      "package_unavailable": "Home Assistant integrácia nie je dostupná pre tento balík",
       "setup_key_expired": "Párovací kľúč expiroval alebo už bol použitý",
-      "unknown": "Neočakávaná chyba"
+      "unknown": "Neočakávaná chyba",
+      "feature_unavailable": "Funkcia Home Assistant nie je dostupná v aktuálnom balíku Sentrymo",
+      "permission_denied": "Integrácia nemá oprávnenie pre túto operáciu"
     },
     "abort": {
       "already_configured": "Sentrymo je už nastavené",
@@ -186,6 +187,56 @@
       "protection_mode_control": {
         "name": "Režim ochrany"
       }
+    }
+  },
+  "exceptions": {
+    "command_missing_cpin": {
+      "message": "Tento príkaz vyžaduje 4-miestny CPIN uložený v integrácii Sentrymo. Znovu spáruj integráciu a zadaj ho."
+    },
+    "command_invalid_cpin": {
+      "message": "Sentrymo odmietlo uložený CPIN. Znovu spáruj integráciu s aktuálnym CPIN-om."
+    },
+    "command_cpin_locked": {
+      "message": "Overovanie CPIN-u je dočasne uzamknuté. Pred ďalším pokusom počkaj."
+    },
+    "command_output_not_configured": {
+      "message": "Tento výstup nie je pre vybrané vozidlo nakonfigurovaný."
+    },
+    "command_vehicle_unavailable": {
+      "message": "Vybrané vozidlo už nie je pre túto integráciu dostupné."
+    },
+    "command_permission_denied": {
+      "message": "Integrácia nemá oprávnenie alebo command scope pre túto operáciu."
+    },
+    "command_commands_disabled": {
+      "message": "Príkazy sú pre túto integráciu Sentrymo vypnuté."
+    },
+    "command_unsupported": {
+      "message": "Vybrané vozidlo tento príkaz nepodporuje."
+    },
+    "command_rate_limited": {
+      "message": "Sentrymo dočasne obmedzilo príkazy. Pred ďalším pokusom počkaj."
+    },
+    "command_authentication_required": {
+      "message": "Autentifikácia Sentrymo už nie je platná. Pred ďalším pokusom dokonči opätovné prihlásenie."
+    },
+    "command_entitlement_unavailable": {
+      "message": "Funkcia Home Assistant nie je dostupná v aktuálnom balíku Sentrymo."
+    },
+    "command_temporarily_unavailable": {
+      "message": "Sentrymo je dočasne nedostupné. Príkaz nebol potvrdený ako prijatý; skús to neskôr."
+    },
+    "command_failed": {
+      "message": "Sentrymo príkaz neprijalo."
+    },
+    "command_vehicle_ambiguous": {
+      "message": "Toto vozidlo existuje vo viacerých konfiguráciách Sentrymo. Zadaj entry_id."
+    }
+  },
+  "issues": {
+    "entitlement_unavailable": {
+      "title": "Funkcia Sentrymo nie je dostupná",
+      "description": "Funkcia Home Assistant nie je dostupná v aktuálnom balíku Sentrymo. Konfigurácia zostáva zachovaná a jej existujúce entity budú nedostupné, kým server prístup neobnoví."
     }
   }
 }

@@ -18,8 +18,8 @@ from .const import (
     API_AUTH_REFRESH,
     API_PROFILE,
     API_STATE_CONFIG,
-    API_STATE_SLOW,
     API_STATE_FAST,
+    API_STATE_SLOW,
     API_STATE_TELEMETRY,
     API_VEHICLES,
     COMMAND_ACCESSORY_ACTIVATE,
@@ -39,43 +39,40 @@ from .const import (
     PROTECTION_MODE_DISABLED,
     PROTECTION_MODE_MANUAL,
 )
+from .errors import (
+    AUTH_REAUTH,
+    AUTHORIZATION_DENIED,
+    COMMAND_REJECTED,
+    ERROR_BEHAVIORS,
+    RATE_LIMITED,
+    RESOURCE_UNAVAILABLE,
+    SentrymoApiError,
+    SentrymoAuthorizationError,
+    SentrymoCannotConnect,
+    SentrymoCapabilityError,
+    SentrymoCommandError,
+    SentrymoInvalidAuth,
+    SentrymoRateLimited,
+    SentrymoTemporaryError,
+    SentrymoVehicleUnavailable,
+    exception_for_error,
+    safe_error_message,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-TokenUpdateCallback = Callable[[dict[str, str]], Awaitable[None]]
+TokenUpdateCallback = Callable[[dict[str, str | None]], Awaitable[None]]
 
-
-class SentrymoApiError(Exception):
-    """Base exception for Sentrymo API errors."""
-
-
-class SentrymoCannotConnect(SentrymoApiError):
-    """Raised when the API cannot be reached."""
-
-
-class SentrymoAuthError(SentrymoApiError):
-    """Raised when authentication fails."""
-
-
-class SentrymoInvalidAuth(SentrymoAuthError):
-    """Raised when credentials are invalid."""
-
-
-class SentrymoPackageUnavailable(SentrymoApiError):
-    """Raised when the user package does not support the integration."""
-
-
-class SentrymoRateLimited(SentrymoApiError):
-    """Raised when a segment is polled too frequently."""
-
-
-class SentrymoCommandError(SentrymoApiError):
-    """Raised when a command request fails."""
-
-    def __init__(self, message: str, *, code: str | None = None) -> None:
-        """Initialize the exception."""
-        super().__init__(message)
-        self.code = code
+_REFRESHABLE_ACCESS_CODES = {
+    "invalid_token",
+    "token_expired",
+}
+_SEGMENT_PATHS = {
+    "fast": API_STATE_FAST,
+    "telemetry": API_STATE_TELEMETRY,
+    "slow": API_STATE_SLOW,
+    "config": API_STATE_CONFIG,
+}
 
 
 class SentrymoApiClient:
@@ -102,16 +99,23 @@ class SentrymoApiClient:
         self._token_update_callback = token_update_callback
         self._segment_cache: dict[str, dict[str, Any]] = {}
         self._segment_next_refresh: dict[str, Any] = {}
+        self._stale_segments: set[str] = set()
 
     @staticmethod
     def normalize_api_url(api_url: str | None) -> str:
-        """Normalize API URL input to `/api/v1` base."""
+        """Normalize API URL input to the dedicated `/api/v1` base."""
         return normalize_api_base_url(api_url, DEFAULT_PROD_API_URL)
 
-    def clear_segment_cache(self) -> None:
-        """Clear cached state segments."""
-        self._segment_cache.clear()
-        self._segment_next_refresh.clear()
+    def clear_segment_cache(self, segment: str | None = None) -> None:
+        """Clear all cached state segments or one selected segment."""
+        if segment is None:
+            self._segment_cache.clear()
+            self._segment_next_refresh.clear()
+            self._stale_segments.clear()
+            return
+        self._segment_cache.pop(segment, None)
+        self._segment_next_refresh.pop(segment, None)
+        self._stale_segments.discard(segment)
 
     def set_tokens(
         self,
@@ -131,6 +135,21 @@ class SentrymoApiClient:
         if resolved_expires_at:
             self.token_expires_at = resolved_expires_at
 
+    async def async_invalidate_session(self) -> None:
+        """Invalidate tokens and cached data after explicit server revocation."""
+        self.access_token = None
+        self.refresh_token = None
+        self.token_expires_at = None
+        self.clear_segment_cache()
+        if self._token_update_callback is not None:
+            await self._token_update_callback(
+                {
+                    CONF_ACCESS_TOKEN: None,
+                    CONF_REFRESH_TOKEN: None,
+                    CONF_TOKEN_EXPIRES_AT: None,
+                }
+            )
+
     async def async_exchange_setup_key(
         self,
         api_url: str,
@@ -140,7 +159,7 @@ class SentrymoApiClient:
         client_name: str | None = None,
         ha_instance_id: str | None = None,
     ) -> dict[str, Any]:
-        """Exchange a setup key for tokens."""
+        """Exchange a one-time setup key for integration tokens."""
         self.api_url = self.normalize_api_url(api_url)
         self.cpin = cpin
 
@@ -149,7 +168,6 @@ class SentrymoApiClient:
             API_AUTH_EXCHANGE,
             json_payload={
                 "setup_key": setup_key,
-                "cpin": cpin,
                 "client_name": client_name,
                 "ha_instance_id": ha_instance_id,
                 "requested_polling": DEFAULT_EXCHANGE_PAYLOAD,
@@ -160,13 +178,16 @@ class SentrymoApiClient:
 
         tokens = self._extract_tokens(response)
         self.set_tokens(**tokens)
-
         return response
 
     async def async_refresh_token(self) -> dict[str, Any]:
-        """Refresh access token."""
+        """Refresh an access token once."""
         if not self.refresh_token:
-            raise SentrymoAuthError("Refresh token missing")
+            raise SentrymoInvalidAuth(
+                "Refresh token missing",
+                code="invalid_refresh_token",
+                behavior=AUTH_REAUTH,
+            )
 
         response = await self._request(
             "post",
@@ -189,25 +210,26 @@ class SentrymoApiClient:
         return await self._request("get", API_PROFILE)
 
     async def async_get_vehicles(self) -> dict[str, Any]:
-        """Fetch vehicles payload."""
+        """Fetch the authoritative authorized vehicle list."""
         return await self._request("get", API_VEHICLES)
 
     async def async_get_snapshot(self, *, force: bool = False) -> dict[str, Any]:
-        """Fetch and merge profile, vehicles and optional state segments into one snapshot."""
+        """Build a snapshot bounded by the latest authorized vehicle response."""
         polling: dict[str, int] = {}
         merged: dict[str, dict[str, Any]] = {}
+        segment_status: dict[str, str] = {}
         server_time: str | None = None
         account: dict[str, Any] = {}
         capabilities: dict[str, Any] = {}
 
-        if force:
-            self.clear_segment_cache()
-
+        # Profile and vehicles are mandatory authorization gates. Never replace
+        # either with cached state.
         try:
             profile = await self.async_get_profile()
         except SentrymoApiError as err:
-            _LOGGER.warning("Sentrymo profile endpoint failed: %s", err)
-            profile = {}
+            if not err.cache_allowed:
+                self.clear_segment_cache()
+            raise
 
         if isinstance(profile, Mapping):
             profile_polling = profile.get("polling")
@@ -233,78 +255,131 @@ class SentrymoApiClient:
         try:
             vehicles_response = await self.async_get_vehicles()
         except SentrymoApiError as err:
-            _LOGGER.warning("Sentrymo vehicles endpoint failed: %s", err)
-            vehicles_response = {}
+            if not err.cache_allowed:
+                self.clear_segment_cache()
+            raise
 
-        vehicles = vehicles_response.get("vehicles") if isinstance(vehicles_response, Mapping) else []
-        if isinstance(vehicles, list):
-            for vehicle in vehicles:
-                if not isinstance(vehicle, Mapping):
-                    continue
+        vehicles = (
+            vehicles_response.get("vehicles")
+            if isinstance(vehicles_response, Mapping)
+            else []
+        )
+        if not isinstance(vehicles, list):
+            vehicles = []
 
-                vehicle_id = self._coerce_vehicle_id(vehicle)
-                if vehicle_id is None:
-                    continue
+        for vehicle in vehicles:
+            if not isinstance(vehicle, Mapping):
+                continue
+            vehicle_id = self._coerce_vehicle_id(vehicle)
+            if vehicle_id is None:
+                continue
+            merged[vehicle_id] = {"vehicle_id": vehicle_id}
+            self._merge_vehicle_segment(merged[vehicle_id], dict(vehicle))
 
-                merged.setdefault(vehicle_id, {"vehicle_id": vehicle_id})
-                self._merge_vehicle_segment(merged[vehicle_id], dict(vehicle))
+        authorized_vehicle_ids = set(merged)
+        self._prune_segment_cache(authorized_vehicle_ids)
 
-        segment_paths = {
-            "fast": API_STATE_FAST,
-            "telemetry": API_STATE_TELEMETRY,
-            "slow": API_STATE_SLOW,
-            "config": API_STATE_CONFIG,
-        }
-
-        for segment, path in segment_paths.items():
+        for segment, path in _SEGMENT_PATHS.items():
+            used_fallback = False
             try:
                 response = await self._get_segment(segment, path, force=force)
-            except SentrymoRateLimited as err:
-                _LOGGER.debug(
-                    "Skipping Sentrymo segment %s because backend asked us to wait: %s",
-                    segment,
-                    err,
-                )
-                cached = self._segment_cache.get(segment)
-                if cached is None:
-                    continue
-                response = cached
+                if segment in self._stale_segments:
+                    used_fallback = True
+                    segment_status[segment] = "cached"
+                    self._mark_segment_unavailable(merged, segment)
             except SentrymoApiError as err:
-                _LOGGER.warning(
-                    "Skipping Sentrymo segment %s because it failed: %s",
-                    segment,
-                    err,
-                )
-                continue
+                if err.cache_allowed:
+                    cached = self._segment_cache.get(segment)
+                    if cached is None:
+                        segment_status[segment] = "unavailable"
+                        self._mark_segment_unavailable(merged, segment)
+                        continue
+                    response = self._filter_segment_response(
+                        cached, authorized_vehicle_ids
+                    )
+                    used_fallback = True
+                    self._stale_segments.add(segment)
+                    if (
+                        isinstance(err, SentrymoRateLimited)
+                        and err.retry_after is not None
+                    ):
+                        self._segment_next_refresh[segment] = (
+                            dt_util.utcnow()
+                            + timedelta(seconds=err.retry_after)
+                        )
+                    segment_status[segment] = "cached"
+                    self._mark_segment_unavailable(merged, segment)
+                    _LOGGER.debug(
+                        "Using non-current cached Sentrymo %s data after %s",
+                        segment,
+                        err.code or err.category.value,
+                    )
+                elif isinstance(
+                    err, (SentrymoAuthorizationError, SentrymoCapabilityError)
+                ):
+                    # A missing read scope affects only this segment. Its cache
+                    # is discarded and entities backed by it become unavailable.
+                    self.clear_segment_cache(segment)
+                    segment_status[segment] = "unavailable"
+                    self._mark_segment_unavailable(merged, segment)
+                    _LOGGER.warning(
+                        "Sentrymo %s data unavailable (%s)",
+                        segment,
+                        err.code or err.category.value,
+                    )
+                    continue
+                else:
+                    # Entitlement, revocation and resource denials are never
+                    # allowed to fall back to a previous authorization snapshot.
+                    self.clear_segment_cache()
+                    raise
 
-            maybe_server_time = response.get("server_time")
+            filtered = self._filter_segment_response(
+                response, authorized_vehicle_ids
+            )
+            if not used_fallback:
+                segment_status[segment] = "fresh"
+
+            maybe_server_time = filtered.get("server_time")
             if isinstance(maybe_server_time, str):
                 server_time = maybe_server_time
 
-            recommended = response.get("recommended_poll_seconds")
+            recommended = filtered.get("recommended_poll_seconds")
             if isinstance(recommended, int):
                 polling[segment] = recommended
 
-            segment_vehicles = response.get("vehicles")
+            segment_vehicles = filtered.get("vehicles")
             if not isinstance(segment_vehicles, list):
+                self._mark_segment_unavailable(merged, segment)
+                segment_status[segment] = "unavailable"
                 continue
 
+            seen_vehicle_ids: set[str] = set()
             for vehicle in segment_vehicles:
                 if not isinstance(vehicle, Mapping):
                     continue
-
                 vehicle_id = self._coerce_vehicle_id(vehicle)
-                if vehicle_id is None:
+                if vehicle_id is None or vehicle_id not in authorized_vehicle_ids:
                     continue
-
-                merged.setdefault(vehicle_id, {"vehicle_id": vehicle_id})
+                seen_vehicle_ids.add(vehicle_id)
                 self._merge_vehicle_segment(merged[vehicle_id], dict(vehicle))
+
+            for vehicle_id in authorized_vehicle_ids - seen_vehicle_ids:
+                self._mark_vehicle_segment_unavailable(
+                    merged[vehicle_id], segment
+                )
+
+        for vehicle in merged.values():
+            unavailable = vehicle.get("_unavailable_segments")
+            if isinstance(unavailable, set):
+                vehicle["_unavailable_segments"] = sorted(unavailable)
 
         return {
             "server_time": server_time,
             "polling": polling,
             "account": account,
             "capabilities": capabilities,
+            "segment_status": segment_status,
             "vehicles": sorted(
                 merged.values(),
                 key=lambda item: str(item.get("name", item.get("vehicle_id", ""))),
@@ -317,7 +392,7 @@ class SentrymoApiClient:
         command: str,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Send a vehicle command."""
+        """Send a command; the response is an acknowledgement, not confirmation."""
         command_payload = {"source": DEFAULT_SOURCE}
         if payload:
             command_payload.update(payload)
@@ -338,7 +413,7 @@ class SentrymoApiClient:
         vehicle_id: int | str,
         mode: str,
     ) -> dict[str, Any]:
-        """Set vehicle protection mode through backend-supported commands."""
+        """Request a protection-mode change."""
         command = {
             PROTECTION_MODE_DISABLED: COMMAND_PROTECTION_DEACTIVATE,
             PROTECTION_MODE_MANUAL: COMMAND_PROTECTION_ACTIVATE,
@@ -346,16 +421,22 @@ class SentrymoApiClient:
         }.get(mode)
 
         if command is None:
-            raise SentrymoCommandError(f"Unsupported protection mode: {mode}")
+            raise SentrymoCommandError(
+                "Unsupported protection mode.",
+                code="validation_error",
+                behavior=COMMAND_REJECTED,
+            )
 
-        return await self.async_send_command(vehicle_id, command, {"mode": mode})
+        return await self.async_send_command(
+            vehicle_id, command, {"mode": mode}
+        )
 
     async def async_set_immobilizer_active(
         self,
         vehicle_id: int | str,
         enabled: bool,
     ) -> dict[str, Any]:
-        """Activate or deactivate the immobilizer output."""
+        """Queue an immobilizer output command."""
         command = (
             COMMAND_IMMOBILIZER_ACTIVATE
             if enabled
@@ -368,16 +449,29 @@ class SentrymoApiClient:
         vehicle_id: int | str,
         enabled: bool,
     ) -> dict[str, Any]:
-        """Activate or deactivate the accessory output."""
-        command = COMMAND_ACCESSORY_ACTIVATE if enabled else COMMAND_ACCESSORY_DEACTIVATE
+        """Queue an accessory output command."""
+        command = (
+            COMMAND_ACCESSORY_ACTIVATE
+            if enabled
+            else COMMAND_ACCESSORY_DEACTIVATE
+        )
         return await self.async_send_command(vehicle_id, command)
 
-    async def _get_segment(self, segment: str, path: str, *, force: bool = False) -> dict[str, Any]:
-        """Fetch a state segment with cache windows based on backend polling."""
+    async def _get_segment(
+        self, segment: str, path: str, *, force: bool = False
+    ) -> dict[str, Any]:
+        """Fetch a state segment within its backend polling window."""
         now = dt_util.utcnow()
         next_refresh = self._segment_next_refresh.get(segment)
 
-        if not force and segment in self._segment_cache and next_refresh is not None and now < next_refresh:
+        if (
+            segment in self._segment_cache
+            and next_refresh is not None
+            and now < next_refresh
+            and (not force or segment in self._stale_segments)
+        ):
+            # A manual refresh may bypass the ordinary freshness window, but
+            # never a server-mandated Retry-After backoff.
             return self._segment_cache[segment]
 
         headers = {"X-Sentrymo-Force-Refresh": "1"} if force else None
@@ -385,6 +479,7 @@ class SentrymoApiClient:
 
         response = await self._request("get", request_path, headers=headers)
         self._segment_cache[segment] = response
+        self._stale_segments.discard(segment)
 
         recommended = response.get("recommended_poll_seconds")
         seconds = (
@@ -393,7 +488,6 @@ class SentrymoApiClient:
             else DEFAULT_EXCHANGE_PAYLOAD.get(segment, 60)
         )
         self._segment_next_refresh[segment] = now + timedelta(seconds=seconds)
-
         return response
 
     async def _request(
@@ -406,13 +500,11 @@ class SentrymoApiClient:
         require_auth: bool = True,
         allow_refresh: bool = True,
     ) -> dict[str, Any]:
-        """Execute an HTTP request."""
+        """Execute an HTTP request using stable error codes."""
         url = f"{self.api_url}{path if path.startswith('/') else f'/{path}'}"
-
         request_headers = {"Accept": "application/json"}
         if headers:
             request_headers.update(headers)
-
         if require_auth and self.access_token:
             request_headers["Authorization"] = f"Bearer {self.access_token}"
 
@@ -429,13 +521,21 @@ class SentrymoApiClient:
         except ClientError as err:
             raise SentrymoCannotConnect("Request failed") from err
 
-        if response.status == 401 and allow_refresh and require_auth and self.refresh_token:
-            _LOGGER.debug("Received 401 from Sentrymo API, attempting token refresh")
-            try:
-                await self.async_refresh_token()
-            except SentrymoApiError as err:
-                raise SentrymoAuthError("Authentication refresh failed") from err
+        body = await self._decode_json(response)
+        code = str(body.get("code") or "")
 
+        if (
+            response.status == 401
+            and code in _REFRESHABLE_ACCESS_CODES
+            and allow_refresh
+            and require_auth
+            and self.refresh_token
+        ):
+            _LOGGER.debug(
+                "Refreshing Sentrymo access token after %s",
+                code,
+            )
+            await self.async_refresh_token()
             return await self._request(
                 method,
                 path,
@@ -445,10 +545,27 @@ class SentrymoApiClient:
                 allow_refresh=False,
             )
 
-        body = await self._decode_json(response)
-        self._raise_for_status(response, body, path)
-
+        error = self._error_for_response(response, body, path)
+        if error is not None:
+            if isinstance(error, SentrymoRateLimited):
+                retry_after = self._retry_after_seconds(response)
+                error.retry_after = retry_after
+            if error.invalidate_session:
+                await self.async_invalidate_session()
+            raise error
         return body
+
+    def _retry_after_seconds(
+        self, response: ClientResponse
+    ) -> int | None:
+        """Parse a bounded numeric Retry-After response header."""
+        headers = getattr(response, "headers", {})
+        value = headers.get("Retry-After") if isinstance(headers, Mapping) else None
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError):
+            return None
+        return max(1, min(seconds, 24 * 60 * 60))
 
     async def _decode_json(self, response: ClientResponse) -> dict[str, Any]:
         """Decode a JSON response safely."""
@@ -456,54 +573,106 @@ class SentrymoApiClient:
             payload = await response.json(content_type=None)
         except ValueError:
             payload = {}
-
         return payload if isinstance(payload, dict) else {}
 
-    def _raise_for_status(
+    def _error_for_response(
         self,
         response: ClientResponse,
         body: Mapping[str, Any],
         path: str,
-    ) -> None:
-        """Convert HTTP failures to domain exceptions."""
+    ) -> SentrymoApiError | None:
+        """Convert an HTTP failure to one domain exception."""
         if response.status < 400:
-            return
+            return None
 
+        base_path = path.split("?", maxsplit=1)[0]
         code = str(body.get("code") or "")
-        message = str(body.get("message") or f"Unexpected API error for {path}")
-        lower_message = message.lower()
+        message = self._redact_cpin(
+            str(body.get("message") or "")
+        )
+        safe_message = safe_error_message(code, message, base_path)
 
-        if response.status == 404 and path in {API_AUTH_EXCHANGE, API_AUTH_REFRESH}:
-            raise SentrymoCannotConnect(
+        if response.status == 404 and base_path in {
+            API_AUTH_EXCHANGE,
+            API_AUTH_REFRESH,
+        }:
+            return SentrymoCannotConnect(
                 "Home Assistant API endpoint was not found. Check API URL."
             )
 
-        if response.status == 422 and path == API_AUTH_EXCHANGE:
-            raise SentrymoInvalidAuth(message)
+        if (
+            base_path == API_AUTH_EXCHANGE
+            and response.status == 422
+            and code not in {"home_assistant_feature_unavailable"}
+        ):
+            return SentrymoInvalidAuth(
+                safe_message,
+                code=code or "validation_error",
+                status=response.status,
+                behavior=AUTH_REAUTH,
+            )
 
-        if response.status == 429 or "polling too frequently" in lower_message:
-            raise SentrymoRateLimited(message or "Polling too frequently.")
+        if code in ERROR_BEHAVIORS:
+            return exception_for_error(
+                code=code,
+                message=message,
+                status=response.status,
+                path=base_path,
+            )
 
-        if response.status in (401, 403):
-            if code == "package_required":
-                raise SentrymoPackageUnavailable(message)
+        if response.status == 401:
+            return SentrymoInvalidAuth(
+                safe_message,
+                code=code,
+                status=response.status,
+                behavior=AUTH_REAUTH,
+            )
+        if response.status == 403:
+            return SentrymoAuthorizationError(
+                safe_message,
+                code=code,
+                status=response.status,
+                behavior=AUTHORIZATION_DENIED,
+            )
+        if response.status == 404:
+            return SentrymoVehicleUnavailable(
+                safe_message,
+                code=code,
+                status=response.status,
+                behavior=RESOURCE_UNAVAILABLE,
+            )
+        if response.status == 429:
+            return SentrymoRateLimited(
+                safe_message,
+                code=code or "rate_limited",
+                status=response.status,
+                behavior=RATE_LIMITED,
+            )
+        if response.status >= 500:
+            return SentrymoTemporaryError(
+                safe_message,
+                code=code,
+                status=response.status,
+            )
+        if "/commands/" in base_path:
+            return SentrymoCommandError(
+                safe_message,
+                code=code,
+                status=response.status,
+                behavior=COMMAND_REJECTED,
+            )
+        return SentrymoApiError(
+            safe_message,
+            code=code,
+            status=response.status,
+            behavior=AUTHORIZATION_DENIED,
+        )
 
-            if code in {
-                "invalid_setup_key",
-                "setup_key_expired",
-                "integration_revoked",
-                "invalid_refresh_token",
-                "refresh_token_expired",
-                "invalid_token",
-            }:
-                raise SentrymoInvalidAuth(message)
-
-            raise SentrymoAuthError(message)
-
-        if "/commands/" in path:
-            raise SentrymoCommandError(message, code=code)
-
-        raise SentrymoApiError(message)
+    def _redact_cpin(self, value: str) -> str:
+        """Redact the configured CPIN from any server-provided text."""
+        if self.cpin:
+            return value.replace(self.cpin, "[REDACTED]")
+        return value
 
     def _extract_tokens(
         self,
@@ -514,17 +683,29 @@ class SentrymoApiClient:
         """Extract normalized token fields from a response payload."""
         access_token = payload.get("access_token")
         if not isinstance(access_token, str) or not access_token:
-            raise SentrymoInvalidAuth("Access token missing in response")
+            raise SentrymoInvalidAuth(
+                "Access token missing in response",
+                code="invalid_authentication",
+                behavior=AUTH_REAUTH,
+            )
 
         resolved_refresh = payload.get("refresh_token")
         if not isinstance(resolved_refresh, str) or not resolved_refresh:
             resolved_refresh = refresh_token or self.refresh_token
 
         if not resolved_refresh:
-            raise SentrymoInvalidAuth("Refresh token missing in response")
+            raise SentrymoInvalidAuth(
+                "Refresh token missing in response",
+                code="invalid_refresh_token",
+                behavior=AUTH_REAUTH,
+            )
 
-        expires_at_value = payload.get("access_token_expires_at") or payload.get("expires_at")
-        expires_at = self._normalize_expires_at(expires_at_value, payload.get("expires_in"))
+        expires_at_value = (
+            payload.get("access_token_expires_at") or payload.get("expires_at")
+        )
+        expires_at = self._normalize_expires_at(
+            expires_at_value, payload.get("expires_in")
+        )
 
         return {
             CONF_ACCESS_TOKEN: access_token,
@@ -540,18 +721,66 @@ class SentrymoApiClient:
                 return parsed.astimezone(UTC).isoformat()
 
         if isinstance(expires_in, (int, float)) and expires_in > 0:
-            return (dt_util.utcnow() + timedelta(seconds=int(expires_in))).isoformat()
+            return (
+                dt_util.utcnow() + timedelta(seconds=int(expires_in))
+            ).isoformat()
 
         return (dt_util.utcnow() + timedelta(hours=12)).isoformat()
 
-    def _merge_vehicle_segment(self, target: dict[str, Any], vehicle: dict[str, Any]) -> None:
+    def _prune_segment_cache(self, authorized_vehicle_ids: set[str]) -> None:
+        """Remove vehicles no longer present in the current vehicle ACL."""
+        for segment, response in tuple(self._segment_cache.items()):
+            self._segment_cache[segment] = self._filter_segment_response(
+                response, authorized_vehicle_ids
+            )
+
+    def _filter_segment_response(
+        self,
+        response: Mapping[str, Any],
+        authorized_vehicle_ids: set[str],
+    ) -> dict[str, Any]:
+        """Return a segment response containing authorized vehicles only."""
+        filtered = dict(response)
+        vehicles = response.get("vehicles")
+        if not isinstance(vehicles, list):
+            filtered["vehicles"] = []
+            return filtered
+
+        filtered["vehicles"] = [
+            dict(vehicle)
+            for vehicle in vehicles
+            if isinstance(vehicle, Mapping)
+            and self._coerce_vehicle_id(vehicle) in authorized_vehicle_ids
+        ]
+        return filtered
+
+    def _mark_segment_unavailable(
+        self, vehicles: Mapping[str, dict[str, Any]], segment: str
+    ) -> None:
+        """Mark one segment unavailable for every authorized vehicle."""
+        for vehicle in vehicles.values():
+            self._mark_vehicle_segment_unavailable(vehicle, segment)
+
+    def _mark_vehicle_segment_unavailable(
+        self, vehicle: dict[str, Any], segment: str
+    ) -> None:
+        """Mark one vehicle segment as unavailable."""
+        unavailable = vehicle.setdefault("_unavailable_segments", set())
+        if isinstance(unavailable, set):
+            unavailable.add(segment)
+
+    def _merge_vehicle_segment(
+        self, target: dict[str, Any], vehicle: dict[str, Any]
+    ) -> None:
         """Merge a segment payload into a unified vehicle structure."""
         vehicle_id = self._coerce_vehicle_id(vehicle)
         if vehicle_id is None:
             return
 
         target["vehicle_id"] = vehicle_id
-        target["updated_at"] = vehicle.get("updated_at", target.get("updated_at"))
+        target["updated_at"] = vehicle.get(
+            "updated_at", target.get("updated_at")
+        )
 
         name = vehicle.get("name")
         if isinstance(name, str) and name:
@@ -606,7 +835,9 @@ class SentrymoApiClient:
             target.setdefault("location", {})
             target["location"].update(dict(gps))
 
-    def _coerce_vehicle_id(self, vehicle: Mapping[str, Any]) -> str | None:
+    def _coerce_vehicle_id(
+        self, vehicle: Mapping[str, Any]
+    ) -> str | None:
         """Get vehicle id from different backend payload variants."""
         value = vehicle.get("vehicle_id", vehicle.get("id"))
 
@@ -617,5 +848,4 @@ class SentrymoApiClient:
 
         if value is None:
             return None
-
         return str(value)
