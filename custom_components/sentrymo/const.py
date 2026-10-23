@@ -31,6 +31,10 @@ API_ENVIRONMENT_URLS = {
 
 DEFAULT_POLL_INTERVAL = timedelta(seconds=60)
 MIN_POLL_INTERVAL = timedelta(seconds=30)
+# How long last known values stay current during temporary network/server
+# failures. Short outages must not flip entities to unavailable and back,
+# because that transition fires state-based automations.
+STALE_DATA_GRACE_PERIOD = timedelta(minutes=10)
 
 DATA_CLIENT = "client"
 DATA_COORDINATOR = "coordinator"

@@ -805,6 +805,58 @@ class TemporaryFailureTest(unittest.IsolatedAsyncioTestCase):
             snapshot["vehicles"][0]["_unavailable_segments"],
         )
 
+    async def test_recent_cache_stays_available_during_outage(self) -> None:
+        instance = client(
+            [
+                profile(),
+                vehicles(1),
+                segment(1, state={"protection_active": True}),
+                segment(1),
+                segment(1),
+                segment(1),
+            ]
+        )
+        await instance.async_get_snapshot()
+        instance._segment_next_refresh["fast"] = (
+            datetime.now(UTC) - timedelta(seconds=1)
+        )
+        instance._session.responses.extend(
+            [profile(), vehicles(1), failure(503, "not_ready")]
+        )
+        snapshot = await instance.async_get_snapshot()
+        vehicle = snapshot["vehicles"][0]
+        self.assertTrue(vehicle["state"]["protection_active"])
+        self.assertEqual(snapshot["segment_status"]["fast"], "cached")
+        self.assertNotIn("fast", vehicle.get("_unavailable_segments", []))
+
+    async def test_old_cache_becomes_unavailable_after_grace(self) -> None:
+        instance = client(
+            [
+                profile(),
+                vehicles(1),
+                segment(1, state={"protection_active": True}),
+                segment(1),
+                segment(1),
+                segment(1),
+            ]
+        )
+        await instance.async_get_snapshot()
+        instance._segment_next_refresh["fast"] = (
+            datetime.now(UTC) - timedelta(seconds=1)
+        )
+        instance._segment_fetched_at["fast"] = (
+            datetime.now(UTC)
+            - const.STALE_DATA_GRACE_PERIOD
+            - timedelta(seconds=1)
+        )
+        instance._session.responses.extend(
+            [profile(), vehicles(1), failure(503, "not_ready")]
+        )
+        snapshot = await instance.async_get_snapshot()
+        self.assertIn(
+            "fast", snapshot["vehicles"][0]["_unavailable_segments"]
+        )
+
     async def test_timeout_is_retryable_without_reauth(self) -> None:
         instance = client([TimeoutError()])
         with self.assertRaises(
@@ -906,6 +958,71 @@ class CoordinatorBehaviourTest(unittest.IsolatedAsyncioTestCase):
             await coordinator._async_update_data()
         self.assertEqual(coordinator.vehicles, [])
 
+
+    async def test_temporary_failure_keeps_recent_snapshot(self) -> None:
+        last = {
+            "vehicles": [
+                {"vehicle_id": "1", "state": {"protection_active": False}}
+            ]
+        }
+
+        class FlakyClient:
+            fail = False
+
+            async def async_get_snapshot(self):
+                if self.fail:
+                    raise errors.SentrymoCannotConnect("Request failed")
+                return last
+
+            def clear_segment_cache(self):
+                raise AssertionError("temporary failure must keep cache")
+
+        flaky = FlakyClient()
+        coordinator = coordinator_module.SentrymoDataUpdateCoordinator(
+            object(), flaky, "entry"
+        )
+        coordinator.data = await coordinator._async_update_data()
+        flaky.fail = True
+
+        self.assertIs(await coordinator._async_update_data(), last)
+
+        coordinator._last_snapshot_at = (
+            datetime.now(UTC)
+            - const.STALE_DATA_GRACE_PERIOD
+            - timedelta(seconds=1)
+        )
+        update_coordinator = sys.modules[
+            "homeassistant.helpers.update_coordinator"
+        ]
+        with self.assertRaises(update_coordinator.UpdateFailed):
+            await coordinator._async_update_data()
+
+    async def test_denial_never_keeps_last_snapshot(self) -> None:
+        denial = errors.exception_for_error(
+            code="permission_denied",
+            message="denied",
+            status=403,
+            path="/profile",
+        )
+
+        class DeniedClient:
+            async def async_get_snapshot(self):
+                raise denial
+
+            def clear_segment_cache(self):
+                pass
+
+        coordinator = coordinator_module.SentrymoDataUpdateCoordinator(
+            object(), DeniedClient(), "entry"
+        )
+        coordinator.data = {"vehicles": [{"vehicle_id": "1"}]}
+        coordinator._last_snapshot_at = datetime.now(UTC)
+        update_coordinator = sys.modules[
+            "homeassistant.helpers.update_coordinator"
+        ]
+        with self.assertRaises(update_coordinator.UpdateFailed):
+            await coordinator._async_update_data()
+        self.assertEqual(coordinator.vehicles, [])
 
     async def test_command_scope_denial_disables_only_commands(
         self,
