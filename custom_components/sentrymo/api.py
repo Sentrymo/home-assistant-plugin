@@ -38,6 +38,7 @@ from .const import (
     PROTECTION_MODE_AUTOMATIC,
     PROTECTION_MODE_DISABLED,
     PROTECTION_MODE_MANUAL,
+    STALE_DATA_GRACE_PERIOD,
 )
 from .errors import (
     AUTH_REAUTH,
@@ -100,6 +101,7 @@ class SentrymoApiClient:
         self._segment_cache: dict[str, dict[str, Any]] = {}
         self._segment_next_refresh: dict[str, Any] = {}
         self._stale_segments: set[str] = set()
+        self._segment_fetched_at: dict[str, Any] = {}
 
     @staticmethod
     def normalize_api_url(api_url: str | None) -> str:
@@ -112,10 +114,19 @@ class SentrymoApiClient:
             self._segment_cache.clear()
             self._segment_next_refresh.clear()
             self._stale_segments.clear()
+            self._segment_fetched_at.clear()
             return
         self._segment_cache.pop(segment, None)
         self._segment_next_refresh.pop(segment, None)
         self._stale_segments.discard(segment)
+        self._segment_fetched_at.pop(segment, None)
+
+    def _cached_segment_within_grace(self, segment: str) -> bool:
+        """Return true while cached segment data is recent enough to show."""
+        fetched_at = self._segment_fetched_at.get(segment)
+        if fetched_at is None:
+            return False
+        return dt_util.utcnow() - fetched_at <= STALE_DATA_GRACE_PERIOD
 
     def set_tokens(
         self,
@@ -286,7 +297,8 @@ class SentrymoApiClient:
                 if segment in self._stale_segments:
                     used_fallback = True
                     segment_status[segment] = "cached"
-                    self._mark_segment_unavailable(merged, segment)
+                    if not self._cached_segment_within_grace(segment):
+                        self._mark_segment_unavailable(merged, segment)
             except SentrymoApiError as err:
                 if err.cache_allowed:
                     cached = self._segment_cache.get(segment)
@@ -308,7 +320,11 @@ class SentrymoApiClient:
                             + timedelta(seconds=err.retry_after)
                         )
                     segment_status[segment] = "cached"
-                    self._mark_segment_unavailable(merged, segment)
+                    # A brief outage keeps the last known values available so
+                    # entities do not bounce through unavailable, which would
+                    # re-fire state automations (e.g. protection "off").
+                    if not self._cached_segment_within_grace(segment):
+                        self._mark_segment_unavailable(merged, segment)
                     _LOGGER.debug(
                         "Using non-current cached Sentrymo %s data after %s",
                         segment,
@@ -480,6 +496,7 @@ class SentrymoApiClient:
         response = await self._request("get", request_path, headers=headers)
         self._segment_cache[segment] = response
         self._stale_segments.discard(segment)
+        self._segment_fetched_at[segment] = now
 
         recommended = response.get("recommended_poll_seconds")
         seconds = (

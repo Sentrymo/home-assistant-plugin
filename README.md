@@ -68,7 +68,7 @@ The API currently returns `accepted` for protection requests and `queued` for ou
 
 If the `home_assistant` entitlement ends while a token is still cryptographically valid, the next authorized request is rejected immediately. The config entry remains present, existing entities become unavailable, cached segments are discarded and Home Assistant reports that the feature is unavailable in the current package. Normal coordinator polling may detect later restoration; the client does not run a login or immediate retry loop.
 
-A denied state scope affects only entities backed by that state segment. Temporary network/server failures and rate limiting may retain bounded cached values, but affected entities are marked unavailable until a current segment succeeds. Cache is never used after entitlement, permission, revocation, vehicle or scope denial.
+A denied state scope affects only entities backed by that state segment. Temporary network/server failures and rate limiting keep the last known values available for up to 10 minutes, so a short API outage does not flip entities to `unavailable` and back (which would re-fire state automations). After that grace period affected entities are marked unavailable until a current segment succeeds. Cache is never used after entitlement, permission, revocation, vehicle or scope denial.
 
 ## Troubleshooting
 
@@ -78,6 +78,20 @@ A denied state scope affects only entities backed by that state segment. Tempora
 - **Permission or scope denied:** review the integration owner, allowed vehicles and granted scopes in Sentrymo.
 - **Command unavailable:** confirm command scope, vehicle capability, integration command setting and locally configured CPIN.
 - **Rate limited or temporary outage:** wait for the next scheduled coordinator update.
+
+### Automations and unavailable states
+
+A longer outage or a Home Assistant restart still moves entities through `unavailable`. A state trigger with only `to: "off"` fires on `unavailable` → `off` even though protection did not change. Ignore those transitions in protection, alarm and similar automations:
+
+```yaml
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.carmen_protection_active
+    from: "on"
+    to: "off"
+```
+
+or use `not_from: ["unavailable", "unknown"]` when any previous value is acceptable.
 
 ## Status
 

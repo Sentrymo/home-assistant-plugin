@@ -11,9 +11,15 @@ from homeassistant.config_entries import ConfigEntryAuthFailed
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import SentrymoApiClient
-from .const import DEFAULT_POLL_INTERVAL, DOMAIN, MIN_POLL_INTERVAL
+from .const import (
+    DEFAULT_POLL_INTERVAL,
+    DOMAIN,
+    MIN_POLL_INTERVAL,
+    STALE_DATA_GRACE_PERIOD,
+)
 from .errors import (
     SentrymoApiError,
     SentrymoEntitlementUnavailable,
@@ -45,6 +51,7 @@ class SentrymoDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.client = client
         self.instance_id = instance_id
+        self._last_snapshot_at: Any = None
 
     def async_apply_vehicle_state(
         self, vehicle_id: str | int, **state_updates: Any
@@ -156,6 +163,7 @@ class SentrymoDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             self._clear_entitlement_issue()
             self.update_interval = self._parse_update_interval(snapshot)
+            self._last_snapshot_at = dt_util.utcnow()
 
         self.async_set_updated_data(snapshot)
 
@@ -173,11 +181,34 @@ class SentrymoDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._clear_entitlement_issue()
             self._apply_server_backoff(err)
             self._discard_if_access_denied(err)
+            if self._can_keep_last_snapshot(err):
+                _LOGGER.warning(
+                    "Sentrymo update failed temporarily (%s); keeping last "
+                    "known state",
+                    self._update_error_message(err),
+                )
+                return self.data
             raise UpdateFailed(self._update_error_message(err)) from err
 
         self._clear_entitlement_issue()
         self.update_interval = self._parse_update_interval(snapshot)
+        self._last_snapshot_at = dt_util.utcnow()
         return snapshot
+
+    def _can_keep_last_snapshot(self, err: SentrymoApiError) -> bool:
+        """Return true when a temporary failure may keep the last snapshot.
+
+        Entities flipping to unavailable and back on a short API outage fire
+        state-trigger automations as if the vehicle state had changed.
+        """
+        if not err.cache_allowed or not isinstance(self.data, dict):
+            return False
+        if self._last_snapshot_at is None:
+            return False
+        return (
+            dt_util.utcnow() - self._last_snapshot_at
+            <= STALE_DATA_GRACE_PERIOD
+        )
 
     def _entitlement_unavailable_snapshot(
         self, err: SentrymoEntitlementUnavailable
@@ -284,6 +315,7 @@ class SentrymoDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self, err: SentrymoApiError
     ) -> dict[str, Any]:
         """Keep registry objects but remove stale authorized vehicle data."""
+        self._last_snapshot_at = None
         snapshot = {
             "vehicles": [],
             "segment_status": {},
