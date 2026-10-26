@@ -191,6 +191,9 @@ def main() -> int:
         runners = fetch_runners(
             env.get("GITHUB_API_URL", "https://api.github.com"), repository, token
         )
+        for r in runners or []:
+            state = "busy" if r.busy else "idle" if r.online else "offline"
+            print(f"  {r.name}: {state}, labels {', '.join(sorted(r.labels))}")
     elif not token:
         print("::warning::RUNNER_STATUS_TOKEN is not set; self-hosted runners are not checked")
 
