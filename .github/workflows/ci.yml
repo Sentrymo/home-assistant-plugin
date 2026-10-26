@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runner:
+    uses: ./.github/workflows/select-runner.yml
+    secrets: inherit
+
+  test:
+    name: Tests (${{ needs.runner.outputs.tier }})
+    needs: runner
+    runs-on: ${{ fromJSON(needs.runner.outputs.runs-on) }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check pyyaml
+
+      - name: Validate manifest and HACS metadata
+        run: |
+          python - <<'PY'
+          import json
+          manifest = json.load(open("custom_components/sentrymo/manifest.json", encoding="utf-8"))
+          hacs = json.load(open("hacs.json", encoding="utf-8"))
+          assert manifest["domain"] in hacs["domains"], "hacs.json domains must include the manifest domain"
+          print(f"sentrymo {manifest['version']}")
+          PY
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -t . -v

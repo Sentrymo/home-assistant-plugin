@@ -1,0 +1,48 @@
+name: Select runner
+
+# Picks the runner for the calling workflow's jobs by Sentrymo's priority:
+# 1. WSL runner on blackhole, 2. GitHub-hosted, 3. this repo's VPS runner,
+# 4. the shared organization VPS runner. See .github/scripts/select_runner.py.
+on:
+  workflow_call:
+    outputs:
+      runs-on:
+        description: JSON runs-on value for the chosen runner
+        value: ${{ jobs.select.outputs.runs-on }}
+      tier:
+        description: wsl, github, repo or shared
+        value: ${{ jobs.select.outputs.tier }}
+    secrets:
+      RUNNER_STATUS_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    name: Select runner
+    # The selector itself is tiny; it runs on GitHub-hosted by default (free on
+    # public repositories). Set RUNNER_SELECTOR_RUNS_ON (JSON) to move it.
+    runs-on: ${{ vars.RUNNER_SELECTOR_RUNS_ON && fromJSON(vars.RUNNER_SELECTOR_RUNS_ON) || 'ubuntu-latest' }}
+    timeout-minutes: 2
+    outputs:
+      runs-on: ${{ steps.select.outputs.runs-on }}
+      tier: ${{ steps.select.outputs.tier }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Select runner
+        id: select
+        env:
+          RUNNER_STATUS_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
+          RUNNER_WSL_LABEL: ${{ vars.RUNNER_WSL_LABEL }}
+          RUNNER_REPO_LABEL: ${{ vars.RUNNER_REPO_LABEL }}
+          RUNNER_SHARED_LABEL: ${{ vars.RUNNER_SHARED_LABEL }}
+          RUNNER_GITHUB_HOSTED: ${{ vars.RUNNER_GITHUB_HOSTED }}
+          RUNNER_GITHUB_LABEL: ${{ vars.RUNNER_GITHUB_LABEL }}
+          RUNNER_FORCE: ${{ vars.RUNNER_FORCE }}
+        run: python3 .github/scripts/select_runner.py
