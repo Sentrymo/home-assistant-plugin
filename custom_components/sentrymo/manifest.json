@@ -5,7 +5,7 @@
   "codeowners": ["@skycomslovakia"],
   "config_flow": true,
   "documentation": "https://sentrymo.eu",
-  "issue_tracker": "https://github.com/skycomslovakia/sentrymo-home-assistant/issues",
+  "issue_tracker": "https://github.com/Sentrymo/home-assistant-plugin/issues",
   "iot_class": "cloud_polling",
   "integration_type": "hub",
   "requirements": []

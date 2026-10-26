@@ -1,4 +1,4 @@
-# Project context: skycomslovakia/sentrymo-home-assistant
+# Project context: Sentrymo/home-assistant-plugin
 
 ## Architecture
 Home Assistant Python custom integration (manifest domain sentrymo, config_flow, cloud_polling, hub type) exposing Sentrymo vehicle states and commands.
