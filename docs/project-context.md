@@ -26,6 +26,10 @@ Manifest version verified as 1.1.1. Actual HA test/lint packaging tasks and full
 - QA and PROD are separated. Backend Go image is deployed via GitOps/ArgoCD; Python custom integration uses HACS/HA installation.
 - Local testing must use fake data and non-production identities.
 
+## Current CI/CD
+- GitHub Actions is the current Sentrymo CI platform (maintainer-confirmed); the exact workflows for this Python integration are (unverified) until inspected.
+- Home Assistant distribution is handled independently of Kubernetes/ArgoCD; the Go Home Assistant API backend uses Sentrymo GitOps deployments. TeamCity is retired.
+
 ## Source provenance
 - Verified: manifest.json / go.mod and service README.
 - Memory: rollout intentions, business entitlement decisions and Sentrymo system boundaries.
