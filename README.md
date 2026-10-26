@@ -40,7 +40,8 @@ The integration creates a device per currently authorized vehicle. Depending on 
 
 - `device_tracker` for vehicle location;
 - sensors for speed, voltages, internal battery, GSM signal, odometer, fuel, timestamps and other telemetry;
-- binary sensors for movement, ignition, protection, alarm, connectivity, crash and supported vehicle states;
+- binary sensors for movement, ignition, protection, alarm, connectivity, crash and supported vehicle states (`Alarm` and `Crash detected` are plain yes/no: `on` while the vehicle alarm is running or a crash is detected);
+- one binary sensor per Sentrymo place (`Place Home`, …), `on` while the vehicle is inside that place;
 - a refresh button.
 
 Every update first obtains an authorized `/vehicles` response. State segments and their cache are filtered through that vehicle set. A cached segment cannot recreate a removed, unentitled or disallowed vehicle.
@@ -92,6 +93,36 @@ triggers:
 ```
 
 or use `not_from: ["unavailable", "unknown"]` when any previous value is acceptable.
+
+### Automations by place
+
+Sentrymo places (geofence areas defined in the Sentrymo app) can trigger automations in three ways.
+
+Per-place binary sensor. A sensor is created the first time the vehicle is seen in a place and is remembered across restarts. It also works as a condition ("is the car home?"):
+
+```yaml
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.tiguan_place_home
+    from: "off"
+    to: "on"
+```
+
+Events for any place. `sentrymo_place_entered` and `sentrymo_place_left` fire when the place list changes between two current updates (never on startup or after an outage). Event data: `entry_id`, `device_id`, `vehicle_id`, `vehicle_name`, `place_id`, `place_name`.
+
+```yaml
+triggers:
+  - trigger: event
+    event_type: sentrymo_place_left
+    event_data:
+      place_name: Home
+actions:
+  - action: notify.mobile_app_phone
+    data:
+      message: "{{ trigger.event.data.vehicle_name }} left {{ trigger.event.data.place_name }}"
+```
+
+The `Places` sensor keeps its comma-separated state and adds `places` and `place_ids` list attributes for templates, e.g. `{{ 'Home' in state_attr('sensor.tiguan_places', 'places') }}`.
 
 ## Status
 

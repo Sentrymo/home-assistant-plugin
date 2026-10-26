@@ -98,6 +98,8 @@ class SentrymoEntity(CoordinatorEntity[SentrymoDataUpdateCoordinator]):
             else set()
         )
         source_segments = _ENTITY_SOURCE_SEGMENTS.get(self.entity_key)
+        if source_segments is None and self.entity_key.startswith("place_"):
+            source_segments = _ENTITY_SOURCE_SEGMENTS["places"]
         if source_segments is None:
             return True
 

@@ -149,7 +149,11 @@
         "name": "Protection active"
       },
       "alarm_active": {
-        "name": "Alarm active"
+        "name": "Alarm",
+        "state": {
+          "on": "Yes",
+          "off": "No"
+        }
       },
       "online": {
         "name": "Online"
@@ -158,7 +162,11 @@
         "name": "Charging"
       },
       "crash_detected": {
-        "name": "Crash detected"
+        "name": "Crash detected",
+        "state": {
+          "on": "Yes",
+          "off": "No"
+        }
       },
       "low_voltage": {
         "name": "Low voltage"
@@ -168,6 +176,13 @@
       },
       "bt_connected": {
         "name": "Bluetooth connected"
+      },
+      "place": {
+        "name": "Place {place}",
+        "state": {
+          "on": "Inside",
+          "off": "Outside"
+        }
       }
     },
     "button": {

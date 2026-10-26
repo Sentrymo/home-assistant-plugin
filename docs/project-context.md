@@ -18,7 +18,7 @@ Keep Home Assistant async I/O lifecycle, config_flow and token-refresh handling.
 - Do not leak or mutate user data across environment or permission boundaries.
 
 ## Current state and technical debt
-Manifest version verified as 1.1.1. Actual HA test/lint packaging tasks and full exposed entities remain (unverified) pending source review.
+Manifest version 1.2.0. Actual HA test/lint packaging tasks and full exposed entities remain (unverified) pending source review.
 - (unverified) Live QA/PROD image versions, API shape for optional sensors and outstanding HA issues.
 - Audit existing tests and Home Assistant platform registration before refactors.
 

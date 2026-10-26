@@ -149,7 +149,11 @@
         "name": "Ochrana aktivní"
       },
       "alarm_active": {
-        "name": "Alarm aktivní"
+        "name": "Poplach",
+        "state": {
+          "on": "Ano",
+          "off": "Ne"
+        }
       },
       "online": {
         "name": "Online"
@@ -158,7 +162,11 @@
         "name": "Nabíjení"
       },
       "crash_detected": {
-        "name": "Detekce nárazu"
+        "name": "Detekován náraz",
+        "state": {
+          "on": "Ano",
+          "off": "Ne"
+        }
       },
       "low_voltage": {
         "name": "Nízké napětí"
@@ -168,6 +176,13 @@
       },
       "bt_connected": {
         "name": "Bluetooth připojeno"
+      },
+      "place": {
+        "name": "Místo {place}",
+        "state": {
+          "on": "V místě",
+          "off": "Mimo"
+        }
       }
     },
     "button": {
