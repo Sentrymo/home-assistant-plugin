@@ -26,6 +26,7 @@ from homeassistant.util import dt as dt_util
 from .const import DATA_COORDINATOR, DOMAIN
 from .coordinator import SentrymoDataUpdateCoordinator
 from .entity import SentrymoEntity
+from .places import vehicle_places
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -124,6 +125,17 @@ def _places(vehicle: dict[str, Any]) -> str | None:
     return None
 
 
+def _places_attributes(vehicle: dict[str, Any]) -> dict[str, Any]:
+    """Return place names and ids as lists for templates and conditions."""
+    places = vehicle_places(vehicle)
+    if places is None:
+        return {}
+    return {
+        "places": [place["name"] for place in places],
+        "place_ids": [place["id"] for place in places if place["id"] is not None],
+    }
+
+
 def _vehicle_status(vehicle: dict[str, Any]) -> str:
     """Build a compact text status."""
     state = _vehicle_state(vehicle)
@@ -155,6 +167,7 @@ class SentrymoSensorDescription(SensorEntityDescription):
     value_fn: Callable[[dict[str, Any]], Any]
     always_create: bool = False
     icon_fn: Callable[[dict[str, Any]], str | None] | None = None
+    attributes_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
 
 SENSOR_DESCRIPTIONS: tuple[SentrymoSensorDescription, ...] = (
@@ -312,6 +325,7 @@ SENSOR_DESCRIPTIONS: tuple[SentrymoSensorDescription, ...] = (
         entity_registry_enabled_default=False,
         icon="mdi:map-legend",
         value_fn=_places,
+        attributes_fn=_places_attributes,
     ),
 )
 
@@ -393,3 +407,10 @@ class SentrymoSensor(SentrymoEntity, SensorEntity):
         if self.entity_description.icon_fn is not None:
             return self.entity_description.icon_fn(self.vehicle)
         return self.entity_description.icon
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return structured attributes when the description provides them."""
+        if self.entity_description.attributes_fn is None:
+            return None
+        return self.entity_description.attributes_fn(self.vehicle)

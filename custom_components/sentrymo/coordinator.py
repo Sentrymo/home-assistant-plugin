@@ -9,7 +9,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntryAuthFailed
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers import device_registry as dr, issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -26,6 +26,12 @@ from .errors import (
     SentrymoInvalidAuth,
     SentrymoRateLimited,
     SentrymoVehicleUnavailable,
+)
+from .places import (
+    EVENT_PLACE_ENTERED,
+    EVENT_PLACE_LEFT,
+    place_changes,
+    vehicle_places,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -52,6 +58,7 @@ class SentrymoDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.client = client
         self.instance_id = instance_id
         self._last_snapshot_at: Any = None
+        self._vehicle_places: dict[str, dict[str, dict[str, Any]]] = {}
 
     def async_apply_vehicle_state(
         self, vehicle_id: str | int, **state_updates: Any
@@ -118,6 +125,65 @@ class SentrymoDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         entry = self.hass.config_entries.async_get_entry(self.instance_id)
         if entry is not None:
             entry.async_start_reauth(self.hass)
+
+    def async_update_listeners(self) -> None:
+        """Fire place enter/leave events before entities update."""
+        self._async_fire_place_events()
+        super().async_update_listeners()
+
+    def _async_fire_place_events(self) -> None:
+        """Compare current places with the last known ones per vehicle.
+
+        A vehicle or place list that is missing (ACL change, unavailable
+        segment, discarded snapshot) forgets the previous state, so events
+        only describe changes observed between two current snapshots.
+        """
+        known: dict[str, dict[str, dict[str, Any]]] = {}
+        for vehicle in self.vehicles:
+            if not isinstance(vehicle, dict):
+                continue
+            vehicle_id = vehicle.get("vehicle_id")
+            if vehicle_id is None:
+                continue
+            vehicle_id = str(vehicle_id)
+            places = vehicle_places(vehicle)
+            if places is None:
+                continue
+            current = {place["key"]: place for place in places}
+            known[vehicle_id] = current
+
+            entered, left = place_changes(
+                self._vehicle_places.get(vehicle_id), current
+            )
+            if not entered and not left:
+                continue
+            base = {
+                "entry_id": self.instance_id,
+                "device_id": self._device_id(vehicle_id),
+                "vehicle_id": vehicle_id,
+                "vehicle_name": vehicle.get("name"),
+            }
+            for event_type, changed in (
+                (EVENT_PLACE_LEFT, left),
+                (EVENT_PLACE_ENTERED, entered),
+            ):
+                for place in changed:
+                    self.hass.bus.async_fire(
+                        event_type,
+                        {
+                            **base,
+                            "place_id": place.get("id"),
+                            "place_name": place.get("name"),
+                        },
+                    )
+        self._vehicle_places = known
+
+    def _device_id(self, vehicle_id: str) -> str | None:
+        """Return the Home Assistant device id of a vehicle."""
+        device = dr.async_get(self.hass).async_get_device(
+            identifiers={(DOMAIN, f"{self.instance_id}_{vehicle_id}")}
+        )
+        return device.id if device is not None else None
 
     async def async_refresh_after_delay(self, delay_seconds: float) -> None:
         """Refresh after a short delay to reconcile an acknowledged command."""

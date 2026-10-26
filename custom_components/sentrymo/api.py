@@ -75,6 +75,8 @@ _SEGMENT_PATHS = {
     "config": API_STATE_CONFIG,
 }
 
+_FAST_PREFERRED_STATE_KEYS = ("address", "places", "place_details")
+
 
 class SentrymoApiClient:
     """Async Sentrymo API client."""
@@ -378,7 +380,9 @@ class SentrymoApiClient:
                 if vehicle_id is None or vehicle_id not in authorized_vehicle_ids:
                     continue
                 seen_vehicle_ids.add(vehicle_id)
-                self._merge_vehicle_segment(merged[vehicle_id], dict(vehicle))
+                self._merge_vehicle_segment(
+                    merged[vehicle_id], dict(vehicle), segment=segment
+                )
 
             for vehicle_id in authorized_vehicle_ids - seen_vehicle_ids:
                 self._mark_vehicle_segment_unavailable(
@@ -787,7 +791,11 @@ class SentrymoApiClient:
             unavailable.add(segment)
 
     def _merge_vehicle_segment(
-        self, target: dict[str, Any], vehicle: dict[str, Any]
+        self,
+        target: dict[str, Any],
+        vehicle: dict[str, Any],
+        *,
+        segment: str | None = None,
     ) -> None:
         """Merge a segment payload into a unified vehicle structure."""
         vehicle_id = self._coerce_vehicle_id(vehicle)
@@ -838,6 +846,14 @@ class SentrymoApiClient:
             nested_package = state_dict.get("package")
             if isinstance(nested_package, str) and nested_package:
                 target["package"] = nested_package
+
+            if segment == "slow":
+                # The slow segment is polled every few minutes and must not
+                # overwrite fresher place/address data from the fast segment,
+                # otherwise place changes reach Home Assistant minutes late.
+                for key in _FAST_PREFERRED_STATE_KEYS:
+                    if key in target["state"]:
+                        state_dict.pop(key, None)
 
             target["state"].update(state_dict)
 

@@ -244,6 +244,10 @@ entity_module = _module(
     "custom_components.sentrymo.entity",
     PACKAGE_DIR / "entity.py",
 )
+places_module = _module(
+    "custom_components.sentrymo.places",
+    PACKAGE_DIR / "places.py",
+)
 diagnostics_module = _module(
     "custom_components.sentrymo.diagnostics",
     PACKAGE_DIR / "diagnostics.py",
@@ -1193,6 +1197,110 @@ class EntityAvailabilityTest(unittest.TestCase):
         )
         self.assertFalse(fast_entity.available)
         self.assertTrue(telemetry_entity.available)
+
+
+class PlacesTest(unittest.IsolatedAsyncioTestCase):
+    """Verify place parsing, fresh merging and enter/leave events."""
+
+    def test_place_details_are_preferred_and_keyed_by_id(self) -> None:
+        vehicle = {
+            "state": {
+                "places": ["Doma", "Test"],
+                "place_details": [
+                    {"id": 7, "name": "Doma", "icon": "home"},
+                    {"id": 9, "name": " Test "},
+                    {"id": 9, "name": "Test"},
+                    {"id": 10, "name": ""},
+                ],
+            }
+        }
+        self.assertEqual(
+            places_module.vehicle_places(vehicle),
+            [
+                {"key": "7", "id": 7, "name": "Doma", "icon": "home"},
+                {"key": "9", "id": 9, "name": "Test"},
+            ],
+        )
+
+    def test_names_only_payload_uses_name_keys(self) -> None:
+        vehicle = {"location": {"places": ["Vrakuňa"]}}
+        self.assertEqual(
+            places_module.vehicle_places(vehicle),
+            [{"key": "name_vrakuna", "id": None, "name": "Vrakuňa"}],
+        )
+
+    def test_missing_places_are_unknown_not_empty(self) -> None:
+        self.assertIsNone(places_module.vehicle_places({"state": {}}))
+        self.assertEqual(
+            places_module.vehicle_places({"state": {"places": []}}), []
+        )
+
+    def test_unknown_side_reports_no_changes(self) -> None:
+        current = {"7": {"name": "Doma"}}
+        self.assertEqual(places_module.place_changes(None, current), ([], []))
+        self.assertEqual(places_module.place_changes(current, None), ([], []))
+        entered, left = places_module.place_changes(
+            {"9": {"name": "Test"}}, current
+        )
+        self.assertEqual(entered, [{"name": "Doma"}])
+        self.assertEqual(left, [{"name": "Test"}])
+
+    async def test_cached_slow_segment_does_not_override_fast_places(
+        self,
+    ) -> None:
+        sentrymo = client(
+            [
+                profile(),
+                vehicles(1),
+                segment(1, state={"places": ["Doma"], "place_details": [{"id": 7, "name": "Doma"}]}),
+                segment(1, state={"speed_kmh": 0}),
+                segment(1, state={"places": [], "place_details": [], "odometer_km": 5}),
+                segment(1),
+            ]
+        )
+        snapshot = await sentrymo.async_get_snapshot()
+        state = snapshot["vehicles"][0]["state"]
+        self.assertEqual(state["places"], ["Doma"])
+        self.assertEqual(state["place_details"], [{"id": 7, "name": "Doma"}])
+        self.assertEqual(state["odometer_km"], 5)
+
+    def test_coordinator_fires_enter_and_leave_events(self) -> None:
+        fired: list[tuple[str, dict[str, Any]]] = []
+
+        class Bus:
+            def async_fire(self, event_type, data):
+                fired.append((event_type, data))
+
+        class Hass:
+            bus = Bus()
+
+        coordinator = coordinator_module.SentrymoDataUpdateCoordinator(
+            Hass(), object(), "entry"
+        )
+        coordinator._device_id = lambda vehicle_id: f"device-{vehicle_id}"
+
+        def update(place_details: list[dict[str, Any]] | None) -> None:
+            state = {} if place_details is None else {"place_details": place_details}
+            coordinator.data = {
+                "vehicles": [{"vehicle_id": "1", "name": "Tiguan", "state": state}]
+            }
+            coordinator._async_fire_place_events()
+
+        update([{"id": 7, "name": "Doma"}])
+        self.assertEqual(fired, [])
+
+        update([{"id": 9, "name": "Test"}])
+        self.assertEqual(
+            [(event, data["place_name"]) for event, data in fired],
+            [("sentrymo_place_left", "Doma"), ("sentrymo_place_entered", "Test")],
+        )
+        self.assertEqual(fired[1][1]["device_id"], "device-1")
+        self.assertEqual(fired[1][1]["place_id"], 9)
+
+        fired.clear()
+        update(None)
+        update([{"id": 7, "name": "Doma"}])
+        self.assertEqual(fired, [])
 
 
 class CommandAndCpinTest(unittest.IsolatedAsyncioTestCase):
