@@ -39,9 +39,11 @@ jobs:
       - name: Check runner prerequisites
         shell: bash
         run: |
-          for tool in python3 zip gh; do
-            command -v "${tool}" >/dev/null || { echo "::error::${tool} is missing on runner ${RUNNER_NAME}"; exit 1; }
+          missing=0
+          for tool in python3 gh; do
+            command -v "${tool}" >/dev/null || { echo "::error::${tool} is missing on runner ${RUNNER_NAME}"; missing=1; }
           done
+          exit "${missing}"
 
       - name: Validate tag and manifest version
         id: version
@@ -61,7 +63,15 @@ jobs:
 
       - name: Build release archive
         shell: bash
-        run: zip -r sentrymo.zip custom_components/sentrymo
+        # Python's zipfile instead of zip, which self-hosted runners may lack.
+        run: |
+          python3 - <<'PY'
+          import pathlib, zipfile
+          with zipfile.ZipFile("sentrymo.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+              for path in sorted(pathlib.Path("custom_components/sentrymo").rglob("*")):
+                  if "__pycache__" not in path.parts:
+                      archive.write(path)
+          PY
 
       - name: Create GitHub release
         env:
