@@ -9,14 +9,28 @@ permissions:
   contents: write
 
 jobs:
+  runner:
+    uses: ./.github/workflows/select-runner.yml
+    secrets: inherit
+    permissions:
+      contents: read
+
   release:
-    name: Publish Home Assistant integration
-    runs-on: ubuntu-latest
+    name: Publish Home Assistant integration (${{ needs.runner.outputs.tier }})
+    needs: runner
+    runs-on: ${{ fromJSON(needs.runner.outputs.runs-on) }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      - name: Check runner prerequisites
+        shell: bash
+        run: |
+          for tool in python3 zip gh; do
+            command -v "${tool}" >/dev/null || { echo "::error::${tool} is missing on runner ${RUNNER_NAME}"; exit 1; }
+          done
 
       - name: Validate tag and manifest version
         shell: bash
