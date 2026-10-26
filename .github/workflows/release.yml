@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "[0-9]+.[0-9]+.[0-9]+"
+  # Release without pushing a tag: tags the target with the manifest version.
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Branch or commit to release
+        default: main
+        required: true
+      notes:
+        description: Release notes (Markdown); generated notes are appended
+        required: false
 
 permissions:
   contents: write
@@ -24,6 +34,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.target || github.ref }}
 
       - name: Check runner prerequisites
         shell: bash
@@ -33,11 +44,20 @@ jobs:
           done
 
       - name: Validate tag and manifest version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           manifest_version="$(python3 -c 'import json; print(json.load(open("custom_components/sentrymo/manifest.json", encoding="utf-8"))["version"])')"
-          test "${GITHUB_REF_NAME}" = "${manifest_version}"
+          if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
+            test "${GITHUB_REF_NAME}" = "${manifest_version}"
+          elif gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${manifest_version}" >/dev/null 2>&1; then
+            echo "::error::Tag ${manifest_version} already exists; bump the manifest version first"
+            exit 1
+          fi
+          echo "tag=${manifest_version}" >> "$GITHUB_OUTPUT"
 
       - name: Build release archive
         shell: bash
@@ -46,9 +66,18 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          NOTES: ${{ inputs.notes }}
         shell: bash
         run: |
-          gh release create "${GITHUB_REF_NAME}" sentrymo.zip \
-            --verify-tag \
-            --generate-notes \
-            --title "Sentrymo ${GITHUB_REF_NAME}"
+          set -euo pipefail
+          args=(--generate-notes --title "Sentrymo ${TAG}")
+          if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
+            args+=(--verify-tag)
+          else
+            args+=(--target "$(git rev-parse HEAD)")
+          fi
+          if [[ -n "${NOTES}" ]]; then
+            args+=(--notes "${NOTES}")
+          fi
+          gh release create "${TAG}" sentrymo.zip "${args[@]}"
