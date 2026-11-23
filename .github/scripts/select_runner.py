@@ -3,9 +3,11 @@
 
 Priority:
   1. WSL self-hosted runner on blackhole (only when online and idle)
-  2. GitHub-hosted runner (unless disabled with RUNNER_GITHUB_HOSTED=false)
-  3. this repository's own VPS runner
-  4. the shared organization VPS runner
+  2. GitHub-hosted runner (unless disabled with RUNNER_GITHUB_HOSTED=false,
+     then the job queues on the blackhole WSL runner)
+
+The VPS runners (this repository's own and the shared organization one) were
+dropped on 2026-11-23; GitHub-hosted runners replace them.
 
 GitHub Actions has no built-in fallback between runners, so this script asks
 the API which self-hosted runners are online and writes the chosen `runs-on`
@@ -20,11 +22,9 @@ Environment:
   GITHUB_API_URL        API base (set by Actions)
   GITHUB_EVENT_PATH     event payload (set by Actions), used for the fork guard
   RUNNER_WSL_LABEL      label of the blackhole WSL runner (default: blackhole)
-  RUNNER_REPO_LABEL     label of this repo's own VPS runner (default: repo name)
-  RUNNER_SHARED_LABEL   label of the shared org VPS runner (default: sentrymo-shared)
   RUNNER_GITHUB_HOSTED  "false" skips tier 2 (e.g. a private repo out of minutes)
   RUNNER_GITHUB_LABEL   GitHub-hosted image (default: ubuntu-latest)
-  RUNNER_FORCE          wsl | github | repo | shared: skip detection
+  RUNNER_FORCE          wsl | github: skip detection
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from typing import Any
 import urllib.error
 import urllib.request
 
-TIERS = ("wsl", "github", "repo", "shared")
+TIERS = ("wsl", "github")
 
 
 @dataclass(frozen=True)
@@ -55,8 +55,6 @@ class Config:
     """Labels and switches that decide each tier."""
 
     wsl_label: str
-    repo_label: str
-    shared_label: str
     github_label: str = "ubuntu-latest"
     github_hosted: bool = True
     force: str = ""
@@ -65,12 +63,7 @@ class Config:
         """Return the runs-on value that targets a tier."""
         if tier == "github":
             return self.github_label
-        label = {
-            "wsl": self.wsl_label,
-            "repo": self.repo_label,
-            "shared": self.shared_label,
-        }[tier]
-        return ["self-hosted", label]
+        return ["self-hosted", self.wsl_label]
 
 
 def _in_tier(runner: Runner, label: str) -> bool:
@@ -91,25 +84,13 @@ def choose(
     if runners is None:
         if config.github_hosted:
             return "github", "self-hosted runner status unknown"
-        return "shared", "runner status unknown and GitHub-hosted disabled"
+        return "wsl", "runner status unknown and GitHub-hosted disabled"
 
-    def online(label: str, idle: bool) -> bool:
-        return any(
-            r.online and (not idle or not r.busy) and _in_tier(r, label)
-            for r in runners
-        )
-
-    if online(config.wsl_label, idle=True):
+    if any(r.online and not r.busy and _in_tier(r, config.wsl_label) for r in runners):
         return "wsl", "blackhole WSL runner is online and idle"
     if config.github_hosted:
         return "github", "blackhole WSL runner is offline or busy"
-    for idle in (True, False):
-        state = "idle" if idle else "busy"
-        if online(config.repo_label, idle):
-            return "repo", f"repository VPS runner is online ({state})"
-        if online(config.shared_label, idle):
-            return "shared", f"shared VPS runner is online ({state})"
-    return "shared", "no self-hosted runner online; queueing on the shared runner"
+    return "wsl", "GitHub-hosted disabled; queueing on the blackhole WSL runner"
 
 
 def _get(url: str, token: str) -> dict[str, Any]:
@@ -177,8 +158,6 @@ def main() -> int:
         return 1
     config = Config(
         wsl_label=env.get("RUNNER_WSL_LABEL") or "blackhole",
-        repo_label=env.get("RUNNER_REPO_LABEL") or repository.split("/", 1)[1],
-        shared_label=env.get("RUNNER_SHARED_LABEL") or "sentrymo-shared",
         github_label=env.get("RUNNER_GITHUB_LABEL") or "ubuntu-latest",
         github_hosted=env.get("RUNNER_GITHUB_HOSTED", "").strip().lower() != "false",
         force=force,

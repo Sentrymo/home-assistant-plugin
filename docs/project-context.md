@@ -27,7 +27,7 @@ Manifest version 1.2.0. Actual HA test/lint packaging tasks and full exposed ent
 - Local testing must use fake data and non-production identities.
 
 ## Current CI/CD
-- GitHub Actions is the current Sentrymo CI platform (maintainer-confirmed). `ci.yml` runs the unit tests and `release.yml` publishes tagged releases; both pick their runner through `select-runner.yml` (blackhole WSL > GitHub-hosted > repo VPS > shared org VPS), see `docs/runners/README.md`.
+- GitHub Actions is the current Sentrymo CI platform (maintainer-confirmed). `ci.yml` runs the unit tests and `release.yml` publishes tagged releases; both pick their runner through `select-runner.yml` (blackhole WSL > GitHub-hosted; VPS runners dropped 2026-11-23), see `docs/runners/README.md`.
 - Home Assistant distribution is handled independently of Kubernetes/ArgoCD; the Go Home Assistant API backend uses Sentrymo GitOps deployments. TeamCity is retired.
 
 ## Source provenance
